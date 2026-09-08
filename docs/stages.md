@@ -38,7 +38,7 @@
 
 - 目标：帧 token + latent action → 自回归预测未来帧 token；同一 latent action 序列可解码出双风格未来。
 - 脚本：
-  - `scripts/s3_tokenize.sh` —— 全量帧 token 离线预计算（存 `/data/sawvla/token_cache/`）
+  - `scripts/s3_tokenize.sh` —— 全量帧 token 离线预计算（存 `data/token_cache/`）
   - `scripts/s3_train_wam.sh` → `src/sawvla/train/train_wam.py --mix {1:0|0:1|1:1}`（**三组消融都要训**）
   - 模型：`src/sawvla/wam/ar_transformer.py`（~200M GPT 式；帧 token 见 architecture.md §3）
 - 配置：序列 8 帧上下文 + 预测 8 帧；batch 32（爆显存降 16 + 累积 2）；lr 1e-4；60k step。

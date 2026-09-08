@@ -1,6 +1,6 @@
 # pretrained_model_dependency.md — 预训练权重与数据依赖（v2）
 
-> 返回总览：[summary.md](summary.md)。权重放 `/data/sawvla/weights/`。下载失败依次尝试：`HF_ENDPOINT=https://hf-mirror.com` → ModelScope → gitee。
+> 返回总览：[summary.md](summary.md)。权重放工程内 `data/weights/`。下载失败依次尝试：`HF_ENDPOINT=https://hf-mirror.com` → ModelScope → gitee。
 > v2：移除 SmolVLA/Octo/OpenVLA/π0/GR00T（VLA 线移出 v1）；新增数据集依赖与视频 tokenizer 选型。
 
 ## 1. 必需模型权重
@@ -38,7 +38,7 @@
 pip install "huggingface_hub[cli]"
 export HF_ENDPOINT=https://hf-mirror.com   # 网络有问题时
 
-huggingface-cli download google/siglip-so400m-patch14-384 --local-dir /data/sawvla/weights/siglip
+huggingface-cli download google/siglip-so400m-patch14-384 --local-dir data/weights/siglip
 # Cosmos Tokenizer 具体 repo id 在 S0 核实后写入
 # 数据集下载走 src/sawvla/data/download_*.py，见 data_preparation.md
 ```

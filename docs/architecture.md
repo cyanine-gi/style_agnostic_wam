@@ -23,7 +23,7 @@ data/ ──> wam/tokenizer(冻结, 仅推理) ──(离散帧 token)──> wa
 
 - **主线**：NVIDIA Cosmos Tokenizer 离散视频 tokenizer（DV），帧 → 离散码。CE 损失的前提。
 - **备选**：Wan2.1 VAE 连续 latent + 离线拟合的残差 VQ 量化层（若 Cosmos 许可/显存/效果有问题）。
-- S0 必须实测确认选型并写回本节；所有帧 token 离线预计算存盘（`/data/sawvla/token_cache/`），**禁止训练时边编码边训**（吞吐打骨折）。
+- S0 必须实测确认选型并写回本节；所有帧 token 离线预计算存盘（`data/token_cache/`），**禁止训练时边编码边训**（吞吐打骨折）。
 
 ## 4. WAM 自回归世界-动作模型（S3，~200M）
 

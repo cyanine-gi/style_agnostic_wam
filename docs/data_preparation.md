@@ -1,6 +1,6 @@
 # data_preparation.md — 数据准备（v2）
 
-> 返回总览：[summary.md](summary.md)。存储根目录：`/data/sawvla/`。
+> 返回总览：[summary.md](summary.md)。存储根目录：**工程内 `data/`**（所有数据集、权重、token 缓存都放这里；`data/` 不进 git）。
 > v2：场景定为 Franka Panda 桌面操作（方案 A）；数据全部优先取 LeRobot 现成格式，免自写 adapter；自建 IsaacLab 生成降级为可选补充。
 
 ## 1. 数据来源总表
@@ -19,13 +19,20 @@
 ```bash
 export HF_ENDPOINT=https://hf-mirror.com   # 网络有问题时
 
-python src/sawvla/data/download_physicalai.py --out /data/sawvla/physicalai_singlearm
-python src/sawvla/data/download_physicalai.py --augmented --out /data/sawvla/physicalai_augmented
-python src/sawvla/data/download_droid.py --filter-tasks configs/droid_task_keywords.yaml --target 5000 --out /data/sawvla/droid_subset
+python src/sawvla/data/download_physicalai.py --out data/physicalai_singlearm
+python src/sawvla/data/download_physicalai.py --augmented --out data/physicalai_augmented
+python src/sawvla/data/download_droid.py --filter-tasks configs/droid_task_keywords.yaml --target 5000 --out data/droid_subset
 ```
 
 - DROID 过滤：`configs/droid_task_keywords.yaml` 维护任务关键词表（drawer/cabinet/pick/place/stack 等），按 episode 级语言指令匹配；过滤结果存 `droid_subset/matching_report.json`，抽 20 条人工核对"画面-指令-任务族"对齐。
-- 网络兜底：`HF_ENDPOINT=https://hf-mirror.com`；ModelScope 有 PhysicalAI 镜像（`nv-community/...`）。
+- 网络兜底：`HF_ENDPOINT=https://hf-mirror.com`（本机直连 HF 不通，脚本已默认走镜像）；ModelScope 有 PhysicalAI 镜像（`nv-community/...`）。
+
+### 实测数据（2026-09-07，脚本 dry-run + 小样本下载）
+
+- DROID（`cadene/droid_1.0.1`，LeRobot v2.1）：95,600 episodes / 95 chunks / 15fps；关键词命中 **47,841** 条，其中 pick_place 45,405（关键词偏宽，" in the "/"put " 命中过泛）、drawer 4,032、cabinet 2,872、stack 1,243。PhysicalAI 侧只有 drawer/cabinet/stack 三类对齐，**建议收紧 pick_place 关键词或干脆只保 drawer/cabinet/stack 三族**（与仿真侧一一对应）。
+- DROID 单 episode（exterior_1_left 一路视频 + parquet）≈ 4.5MB，5,000 条 ≈ 22GB，原 60–100GB 预算偏保守，可放宽 target 或加一路相机。
+- PhysicalAI-SingleArm：6 个子数据集各为独立 LeRobot（30fps，world_camera + hand_camera + 两路 depth）；panda-open-drawer 有 1,273 episodes，单条约 0.3MB/相机，总体积将远小于 80GB 预估。
+- 工程约束：本机直连 HF 不通；**文件列举（小流量）走官方 API + 本地代理 (见local_network.md)**（hf-mirror 分页 Link 头指回 huggingface.co，直连必挂），文件本体（大流量）走 hf-mirror —— 已在 `hf_utils.py` 实现，见 local_network.md。大仓库（DROID/SingleArm）枚举仍走 meta/info.json 模板，比逐页列举快几个数量级。
 
 ## 3. 统一格式（LeRobot v2，薄封装）
 
@@ -55,15 +62,18 @@ meta/episodes.jsonl # episode_id, domain(sim|real|aug), source, embodiment, task
 - 真机数据抽 20 条人工检查：画面-指令-动作三者对齐。
 - 数据卡自动生成 `docs/datacard.md`（各源条数/时长/任务族分布/相机分布）。
 
-## 6. 存储规划（/data/sawvla/）
+## 6. 存储规划（工程内 data/）
 
 | 目录 | 预算 |
 |---|---|
-| `physicalai_singlearm/` | 80GB |
-| `droid_subset/` | 100GB |
-| `physicalai_augmented/` | 10GB |
-| `weights/` | 20GB |
-| `ckpt/` | 200GB |
+| `data/physicalai_singlearm/` | 80GB |
+| `data/droid_subset/` | 100GB |
+| `data/physicalai_augmented/` | 10GB |
+| `data/weights/` | 20GB |
+| `data/token_cache/` | 50GB |
+| `data/ckpt/` | 200GB |
+
+`data/` 整目录进 `.gitignore`；版本号与各源 `meta/dataset_version.txt` 提交到 git（只提交元信息，不提交数据本体）。
 
 ## 7. 版本管理
 

@@ -1,0 +1,22 @@
+# DROID 同任务子集过滤关键词（download_droid.py --filter-tasks 使用）
+# 任务族与 PhysicalAI-SingleArm 的 6 个子数据集对齐：开关抽屉/柜门、取放、堆叠。
+# 匹配规则：episode 的任一语言指令包含任一关键词（大小写不敏感子串匹配）。
+# 调参后务必查看输出目录里的 matching_report.json，并人工抽检（data_preparation.md §2）。
+
+families:
+  drawer:
+    - "drawer"
+  cabinet:
+    - "cabinet"
+    - "cupboard"
+  stack:
+    - "stack"
+  pick_place:
+    - "pick"
+    - "place"
+    - "put "
+    - " into "
+    - " in the "
+    - "bowl"
+    - "basket"
+    - "bin"
