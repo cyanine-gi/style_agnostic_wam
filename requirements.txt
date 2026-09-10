@@ -1,0 +1,13 @@
+# Core scientific stack
+numpy>=1.24,<2.0
+scipy>=1.10
+
+# HDF5 data access (RoboMIND2.0 trajectories)
+h5py>=3.8
+
+# Visualization
+matplotlib>=3.7
+opencv-python>=4.8
+
+# Progress / utilities
+tqdm>=4.65
