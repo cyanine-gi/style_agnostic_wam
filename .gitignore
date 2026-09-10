@@ -1,5 +1,7 @@
-# 数据与权重（见 docs/data_preparation.md §6，只提交元信息）
+# 数据,模型与权重（见 docs/data_preparation.md §6，只提交元信息）
 data/
+pretrained_models/
+docs_deprecated/
 
 # Python
 __pycache__/
@@ -10,5 +12,7 @@ __pycache__/
 logs/
 runs/
 wandb/
+outputs/
+
 # 本地配置
 local_network.md

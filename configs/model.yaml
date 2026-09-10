@@ -1,0 +1,22 @@
+# 预训练模型路径与选择(guideline §11.2:模型选择与冻结边界的唯一事实来源)
+# 所有权重经 scripts/download_pretrained.py 下载至本地,运行时禁止联网拉取。
+
+paths:
+  teacher: pretrained_models/Depth-Anything-V2-Large-hf  # Depth Anything V2-L 稠密深度教师(HF 格式)
+  encoder: pretrained_models/dinov2-base                 # DINOv2-B/14 冻结 RGB 编码器(HF 格式)
+  vlm: pretrained_models/Qwen3-VL-2B-Instruct            # Stage 3 VLA backbone
+
+encoder:
+  name: dinov2-base        # v1 默认 DINOv2-B/14;换 DINOv3 需重新走 baseline 验收(§3.1)
+  patch: 14
+  frozen: true             # 冻结,第 3 层缓冲;风格归一留给教师监督 + GRL(§7.2)
+
+teacher:
+  name: depth-anything-v2-large
+  input_size: 518          # 离线推理 batch 8 @ 518px(§3.1, §9)
+  # 注意:教师输出是相对深度(affine-invariant),与 GT 毫米深度的分布差异
+  # 由归一化 + σ 软降权吸收(§5.3),不引入第三套掩码规则
+
+vlm:
+  name: qwen3-vl-2b-instruct
+  attn_implementation: sdpa  # 不装 flash-attn;sdpa 实测峰值 4.15 GiB(16GB 卡)

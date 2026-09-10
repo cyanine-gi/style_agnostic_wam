@@ -11,3 +11,20 @@ opencv-python>=4.8
 
 # Progress / utilities
 tqdm>=4.65
+
+#data/model preparation
+modelscope
+
+# DL stack (pinned, 2026-09-10)
+# torch 2.9.1 + torchvision 0.24.1 为官方配对;PyPI linux wheel 自带 cu12x runtime
+torch==2.9.1
+torchvision==0.24.1
+# transformers 4.57.x 是引入 Qwen3-VL 的 4.x 末代线;不升 5.x(大版本有 breaking changes)
+transformers==4.57.6
+accelerate==1.10.1
+qwen-vl-utils==0.0.14
+# Depth Anything V2 / DINOv2-v3 教师与编码器依赖
+timm==1.0.20
+einops==0.8.2
+# 配置加载(脚本直接 import,显式钉死)
+PyYAML==6.0.3
