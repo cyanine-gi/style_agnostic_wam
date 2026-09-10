@@ -1,22 +1,75 @@
-# 预训练模型路径与选择(guideline §11.2:模型选择与冻结边界的唯一事实来源)
-# 所有权重经 scripts/download_pretrained.py 下载至本地,运行时禁止联网拉取。
+# 模型配置（guideline v2 / 隐空间与深度监督设计 §2、§7、§8 的唯一事实来源）
+# 所有权重经 ModelScope 下载至本地，运行时禁止联网拉取。
+# 历史：v1 版（dinov2-base 冻结）已废弃，勿参考；encoder 全程可微调是 v2 硬规格。
 
 paths:
-  teacher: pretrained_models/Depth-Anything-V2-Large-hf  # Depth Anything V2-L 稠密深度教师(HF 格式)
-  encoder: pretrained_models/dinov2-base                 # DINOv2-B/14 冻结 RGB 编码器(HF 格式)
-  vlm: pretrained_models/Qwen3-VL-2B-Instruct            # Stage 3 VLA backbone
+  encoder: pretrained_models/dinov2-small-reg           # DINOv2-S/14 registers（HF 格式，22M）
+  teacher: pretrained_models/Depth-Anything-V2-Large-hf # Depth Anything V2-L 稠密深度教师
+  vlm: pretrained_models/Qwen3-VL-2B-Instruct           # Stage 3 VLA backbone
+
+latent:
+  grid_size: 16        # 16×16=256 patch token；空间网格是深度可解码性下限，不可压
+  dim: 384             # 每帧 256×384 = 98,304 维；显存富余先升通道再升分辨率
+  image_size: 224      # 输入分辨率（位置编码自动插值）
 
 encoder:
-  name: dinov2-base        # v1 默认 DINOv2-B/14;换 DINOv3 需重新走 baseline 验收(§3.1)
+  name: dinov2-small-reg
   patch: 14
-  frozen: true             # 冻结,第 3 层缓冲;风格归一留给教师监督 + GRL(§7.2)
+  frozen: false        # v2 硬规格：禁止冻结（Stage 0 深度塑形 + Stage 2 GRL 除域都要梯度进 E）
+  lr: 1.0e-4           # 预训练初始化，低于从零训练的 3e-4 量级
+  anti_drift:
+    enabled: true      # 防漂移锚：冻结 DINOv2 副本 + 小权重特征蒸馏正则
+    distill_weight: 0.1  # 小权重起步，按 SSL 探针监控回调
+
+transition:
+  d: 384
+  depth: 8             # ≈20M 参数（上限 ≤100M）；欠拟合先加课程/深度，最后动宽度
+  n_heads: 6
+  mlp_ratio: 4.0
+  action_tokens: per_step  # 已裁决 2026-09-11：每步动作 1 token，k 步=k token，禁止整块压缩
+  n_cond: 2            # 每帧条件 token 数：1 本体感 + 1 动作（逐帧 block 交错）
+  causal: block        # block-causal：第 j+1 帧预测只见 a_{≤j}（overall_tensor_flow §3.2）
+  max_frames: 16       # 帧索引 embedding 表大小（多步展开上限）
+  frameskip: [1, 2, 4, 8]  # 训练时随机采样，避免平凡复制解
+  unroll_steps: [1, 2, 4]  # 多步展开损失步数
+  dyn_weight: true     # 动态区域损失加权（按相邻帧 latent 差）
+  lr: 1.0e-4
+
+depth_decoder:
+  out_size: 64         # 64×64（上限 112×112）；满分辨率仅评估/可视化
+  width1: 256
+  width2: 128
+  use_uv: true         # 入口拼接归一化 uv 坐标 2 通道（助深度边缘对齐）
+  log_sigma_min: -3.0  # log σ clamp，防塌缩
+  log_sigma_max: 5.0
+  # 硬约束：输入只允许 z，禁止 encoder skip connection（代码评审检查项）
+
+discriminator:
+  hidden: 128          # ~1M 参数，刻意小容量防 GRL 不稳
+  grl_lambda_max: 0.1  # λ 从 0 在 ~5k step 内 ramp，禁止一步加满
+  grl_ramp_steps: 5000
+
+loss:
+  lambda_metric: 1.0   # 异方差 Laplacian NLL，仅传感器有效点
+  lambda_teacher: 1.0  # 教师稠密蒸馏（scale-and-shift 对齐），主监督
+  lambda_grad: 0.5     # 多尺度梯度损失（4 级：64/32/16/8）
+  lambda_smooth: 0.1   # RGB 边缘感知平滑，仅空洞区
+  n_grad_scales: 4
+  pool_valid_thresh: 0.5  # 掩码感知降采样的有效比例阈值
 
 teacher:
   name: depth-anything-v2-large
-  input_size: 518          # 离线推理 batch 8 @ 518px(§3.1, §9)
-  # 注意:教师输出是相对深度(affine-invariant),与 GT 毫米深度的分布差异
-  # 由归一化 + σ 软降权吸收(§5.3),不引入第三套掩码规则
+  input_size: 518      # 离线推理 batch 8 @ 518px；两域同一 checkpoint
+  # 教师输出相对深度（affine-invariant），经 per-image scale-and-shift 对齐进损失
 
 vlm:
   name: qwen3-vl-2b-instruct
-  attn_implementation: sdpa  # 不装 flash-attn;sdpa 实测峰值 4.15 GiB(16GB 卡)
+  attn_implementation: sdpa  # Stage 3：LoRA + 8-bit 优化器，禁止全量微调
+
+# VLA 侧组件（已裁决 2026-09-11）：跟着 VLA 走，不是 WAM 本体；
+# WAM 对外接口恒定 256×384 patch token，是否/如何压缩是本 adapter 的内部事务。
+vla_adapter:
+  d: 384             # 输入：WAM latent 通道
+  d_inner: 512       # 逐 token Linear(d→d_inner)+GELU；刻意凑 4×d_inner == llm_dim
+  pool: 2            # space-to-depth 2×2 → 8×8=64 token（无损重排，保 uv 结构）
+  llm_dim: 2048      # Qwen3-VL-2B text hidden（以本地 config.json 为准）；换 VLM 必须同步改
