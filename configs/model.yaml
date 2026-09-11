@@ -1,4 +1,4 @@
-# 模型配置（guideline v2 / 隐空间与深度监督设计 §2、§7、§8 的唯一事实来源）
+# 模型配置（guideline v2 / 隐空间与监督设计 §2、§7、§8 的唯一事实来源）
 # 所有权重经 ModelScope 下载至本地，运行时禁止联网拉取。
 # 历史：v1 版（dinov2-base 冻结）已废弃，勿参考；encoder 全程可微调是 v2 硬规格。
 
@@ -23,6 +23,8 @@ encoder:
 
 transition:
   d: 384
+  action_dim: 16       # [已核实 2026-09-11] Franka：双臂7关节+双夹爪（configs/data.yaml curves）
+  proprio_dim: 16      # 同构，puppet 实测
   depth: 8             # ≈20M 参数（上限 ≤100M）；欠拟合先加课程/深度，最后动宽度
   n_heads: 6
   mlp_ratio: 4.0

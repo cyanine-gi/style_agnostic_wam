@@ -190,6 +190,13 @@ def play(path: str, fps: float):
         timer.add_callback(tick)
         timer.start()
 
+        # ---- enlarge: scale figure so top color images render 1:1 on screen ----
+        fig.canvas.draw()
+        bbox = img_axes[0].get_window_extent()  # current on-screen size in px
+        ih, iw = decode_color(color_ds[cams[0]][0]).shape[:2]
+        w_in, h_in = fig.get_size_inches()
+        fig.set_size_inches(w_in * iw / bbox.width, h_in * ih / bbox.height)
+
         render(0)
         plt.show()
 

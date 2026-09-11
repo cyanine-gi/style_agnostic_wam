@@ -25,18 +25,25 @@ python scripts/download_pretrained.py --verify   # 全部下载并做加载自�
 | 角色 | 模型 | 用途 |
 |---|---|---|
 | teacher | Depth Anything V2-L | 稠密深度教师，离线推理（§3.1） |
-| encoder | DINOv2-B/14 | Stage 0 冻结 RGB 编码器（§3.2） |
+| encoder | DINOv2-S/14-reg | RGB 编码器，全程可微调（§2.3-E，v2 硬规格） |
 | vlm | Qwen3-VL-2B-Instruct | Stage 3 VLA backbone(§3.6） |
 
 模型路径与冻结边界写在 [configs/model.yaml](configs/model.yaml)，改模型只改这里。
 
 ## 数据准备
 
-git clone https://www.modelscope.cn/datasets/Dexmal/robotwin2-full.git
+默认数据集（2026-09-11 起，Tienkung 已归档）：RoboMIND2.0 Franka 双臂，
+real = `data/RoboMIND2.0-Franka-Part-1`，sim = `data/RoboMIND2.0-Franka-sim`
+（ModelScope `X-Humanoid/RoboMIND2.0-Franka-Part-1` /
+`X-Humanoid/RoboMIND2.0-Franka-sim`），matched 任务 hang_cup_on_cup_holder。
+数据加载约定见 [docs/dataloader.md](docs/dataloader.md) 与
+[configs/data.yaml](configs/data.yaml)。
 
-modelscope download  --dataset X-Humanoid/RoboMIND2.0-Tienkung --include data/tienkung/put_egg_into_box/* --local_dir ./RoboMIND2.0-Tienkung
+数据检查/可视化（RGB/深度网格 + 动作曲线 + 报告）：
 
-git clone https://www.modelscope.cn/datasets/X-Humanoid/RoboMIND2.0-Tienkung-sim.git RoboMIND2.0-Tienkung-sim
+```bash
+python scripts/check_franka_dataset.py    # 默认取两边文件名最小的 episode
+```
 
 ## 数据可视化工具
 
@@ -48,7 +55,7 @@ git clone https://www.modelscope.cn/datasets/X-Humanoid/RoboMIND2.0-Tienkung-sim
 数据与模型就绪后，用统一脚本验证三个模型都能在真实数据帧上推理：
 
 ```bash
-python scripts/test_pretrained_models.py                 # 默认取 tidy_desktop 一帧
+python scripts/test_pretrained_models.py                 # 默认取 Franka real 一帧
 python scripts/test_pretrained_models.py --hdf5 <path> --frame 500
 ```
 
@@ -60,5 +67,17 @@ python scripts/test_pretrained_models.py --hdf5 <path> --frame 500
 python scripts/visualize_robomind_hdf5.py <trajectory.hdf5> --save
 python scripts/visualize_robomind_hdf5.py <trajectory.hdf5> --summary-only   # 只打印结构摘要
 ```
+
+## 关键设计裁决记录
+
+> 只收录跨模块的口径性裁决；细节讨论记录在各设计文档与代码模块头。
+
+- **Cycle 可逆性检验 = 运行时探针，不进训练损失**（2026-09-11 裁决）：
+  前向动作推 k 步 → 输入完全相反的动作再推 k 步（动作空间是绝对关节
+  位置，反向序列 = 原轨迹倒放，零构造代价）→ 与起始帧 latent 比较。
+  它只用于运行时诊断（残差空间分布定位不可逆区域/接触事件、衡量 T 的
+  累计展开误差），**禁止**作为一致性损失参与训练——机械臂可逆但场景
+  不可逆（杯子被推走不会回来），全图一致性损失会教出"松手杯子弹回"
+  的幻觉动力学。
 
 

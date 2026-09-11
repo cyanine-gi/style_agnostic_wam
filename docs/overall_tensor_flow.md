@@ -2,7 +2,7 @@
 
 > 本文档说明世界模型与 Qwen3-VL 之间的端到端信息流，回答四个问题：
 > (1) 动作怎么注入世界模型；(2) Qwen3-VL 与 DINOv2 的位置编码是否统一、如何统一；(3) 全链路因果注意力怎么设计；(4) VLA 侧采用什么架构形态——**双流/双塔并存**（§6 决策与机制，§7 同类框架对比依据）。
-> 姊妹文档：`guideline.md`（训练流程与工程约束）、"latent_space_and_depth_supervision_design.md"（隐空间/解码器/算力）。冲突时以较新者为准。发现冲突第一时间告知用户并询问意见.
+> 姊妹文档：`guideline.md`（训练流程与工程约束）、"latent_space_and_supervision_design.md"（隐空间/解码器/算力）。冲突时以较新者为准。发现冲突第一时间告知用户并询问意见.
 
 ---
 
@@ -34,7 +34,7 @@ z 必须是**纯观测表征**。动作若进 E，z_t 就携带了未来信息�
 
 ### 1.2 注入结构
 
-- **数据侧**：动作向量维度 `[待本地核实]`（天工双臂预计 2×(7DoF+gripper) 量级）。归一化统计量只从 train split 计算；**sim/real 的动作量纲与控制频率必须在 introspection 时核对**，不一致则先做动作重参数化再统一归一化（域差异不能在动作通道上混进 T）。
+- **数据侧**：动作向量维度 `[已核实 2026-09-11，Franka]` = **16**（双臂 7DoF 关节 + 双夹爪，action=master 指令、proprio=puppet 实测；夹爪方向两域一致：高=抓握）。归一化统计量只从 train split 计算；**sim/real 的动作量纲与控制频率必须在 introspection 时核对**（Franka 已核对：关节同为 rad、30Hz 对齐序列；夹爪 real 归一化 [0,1] / sim 连续 [0,~0.16]，归一化统计桥接，见 dataloader.md §12.5），不一致则先做动作重参数化再统一归一化（域差异不能在动作通道上混进 T）。
 - **token 化**：action chunk 共 k 步，每步动作向量经 MLP(action_dim→384) 升为 **1 个 action token**（k 步 = k 个 token，每步一个，不用固定数压缩——逐步 token 的因果语义干净）；本体感向量 → 1 个 proprio token。
 - **条件方式**：**token 拼接进 T 的自注意力序列**为主方案（每个 patch 可通过注意力决定自己受动作影响的程度，空间选择性天然具备）；AdaLN 全局调制为消融项。
 - **位置编码**：action/proprio token **只加时间维位置编码**（各自 step 索引），不加空间编码——它们是全局量，不绑定 uv（V-JEPA 2-AC 做法）。

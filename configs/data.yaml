@@ -1,0 +1,72 @@
+# 数据配置（dataloader.md 的表里文档；Franka 切换后的实测结论已落档于此）
+# 2026-09-11 数据集切换（用户裁决）：弃用 Tienkung，默认数据集 =
+# Franka real（Part-1，300 success episodes / 8.8 万帧 / 100GB）
+# + Franka sim（319 success episodes / 5.7 万帧 / 48GB），
+# 同名 matched 任务 hang_cup_on_cup_holder——同机器人、同任务、EE 同构，
+# 是"完美对应"数据。Tienkung 相关全部归档，后续有空再议。
+# 实测依据：scripts/check_franka_dataset.py，outputs/check_franka{,_ep2}/。
+
+domains:
+  real:
+    root: data/RoboMIND2.0-Franka-Part-1
+    domain_id: 0
+    camera: camera_front      # [已裁决 2026-09-11] 两域统一 camera_front；
+                              # 但注意两域该机位视角不一致（real 主批次斜视 /
+                              # sim 近垂直顶视），处理待裁决，
+                              # 见 dataloader.md §12.9
+    depth_range: [1, 5000]    # uint16 毫米；0=洞，65535=远平面哨兵，
+                              # 场景实测 <2.5m（FrankaRealDataset 默认）
+    tasks:
+      - hang_cup_on_cup_holder
+  sim:
+    root: data/RoboMIND2.0-Franka-sim
+    domain_id: 1
+    camera: camera_front      # 近垂直顶视 1280×720；注意与 real 的
+                              # camera_front（斜视）视角不一致，见 §12.9
+    depth_range: [1, 10000]   # uint16 毫米；65535=哨兵，场景实测 <3.3m
+    tasks:
+      - 124-hang_cup_on_cup_holder   # 另有拼写错误空目录 ..._holer（0 eps），忽略
+
+# 域对抗对照集（dataloader.md §2.3）：Franka 切换后全库即 matched
+# （两域各只有这一个对应任务），GRL 与域探针可在全量数据上进行
+matched_tasks:
+  real: [hang_cup_on_cup_holder]
+  sim: [124-hang_cup_on_cup_holder]
+
+# 动作/本体感预处理（ActionPreprocessor，src/sawvla/data/action.py）
+# [已裁决 2026-09-11] 默认 = FrankaJointGripperPreprocessor，16 维全自由度：
+# [左臂7关节, 右臂7关节, 左夹爪, 右夹爪]，action=master 指令、
+# proprio=puppet 实测。臂曲线一律裁前 7 维（real arm_align 8 维 =
+# 7关节+夹爪且第 8 维 ≡ EE 字段；sim 纯 7 维），夹爪统一取独立 EE 字段
+# ⇒ 两域无分支。EE 方向两域一致（逐帧图像核实）：高=抓握、0=松开；
+# real 归一化 bang-bang [0,1]，sim 连续 [0,~0.16]，归一化统计待落盘。
+curves:
+  load:                     # dataset 预读进内存的曲线全集
+    - master/arm_left_position_align
+    - master/arm_right_position_align
+    - master/end_effector_left_position_align
+    - master/end_effector_right_position_align
+    - puppet/arm_left_position_align
+    - puppet/arm_right_position_align
+    - puppet/end_effector_left_position_align
+    - puppet/end_effector_right_position_align
+  action:                   # action 向量 = 按序拼接（臂裁前 7 维）
+    - master/arm_left_position_align
+    - master/arm_right_position_align
+    - master/end_effector_left_position_align
+    - master/end_effector_right_position_align
+  proprio:
+    - puppet/arm_left_position_align
+    - puppet/arm_right_position_align
+    - puppet/end_effector_left_position_align
+    - puppet/end_effector_right_position_align
+
+image:
+  size: 224               # resize 目标（编码器输入）
+  patch: 14               # DINOv2 patch；填黑按 patch 行对齐
+  # [已裁决 2026-09-11] 方案 B'：等比缩放到 224×126 后上下填黑补 1:1
+  # （上 3 行 patch / 下 4 行，内容 9 行）。两域同为 16:9 ⇒ 黑边占比恒定，
+  # 不是域标签；无畸变；全画幅（杯架贴边，裁剪方案会丢）。完整讨论记录
+  # 见 src/sawvla/data/image.py 模块头。
+  # 深度监督侧离线产物必须施加完全相同的填黑几何（填黑区 mask=0），
+  # 见 docs/depth_gt_supervision.md。

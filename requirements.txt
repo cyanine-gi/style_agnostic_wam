@@ -31,3 +31,6 @@ PyYAML==6.0.3
 
 # 单元测试
 pytest==9.1.1
+
+# 训练可视化(scripts/train_stage0.py;未安装时自动降级只写 log.jsonl)
+tensorboard==2.21.0

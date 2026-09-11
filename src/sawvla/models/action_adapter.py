@@ -8,8 +8,9 @@
 - k 可变（帧跳/展开步数由采样决定），本模块对步数无假设；
 - 这些 token 不携带空间位置编码（在 T 内部只加时间维编码，见 transition.py）。
 
-action_dim / proprio_dim 由 config 传入（RoboMIND 动作维数待 §4.1 introspection
-确认后写入 configs/data.yaml），本模块不硬编码默认值。
+action_dim / proprio_dim 由 config 传入（`[已核实 2026-09-11]` Franka 数据
+= 16 维：双臂 7 关节 + 双夹爪，见 configs/data.yaml curves 段与
+sawvla.data.FrankaJointGripperPreprocessor），本模块不硬编码默认值。
 """
 
 from __future__ import annotations

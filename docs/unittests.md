@@ -12,7 +12,7 @@ conda activate style_agnostic_wam
 python -m pytest tests/ -q
 ```
 
-- 预期结果：**53 passed**（测试数量随开发增长，以全绿为准）。
+- 预期结果：**77 passed**（测试数量随开发增长，以全绿为准）。
 - 编码器相关测试需要本地权重 `pretrained_models/dinov2-small-reg`，缺失时自动 skip。
 - 显存测试需要 CUDA GPU，无 GPU 环境自动 skip。
 - 只看某个模块：`python -m pytest tests/test_losses.py -q`；
@@ -122,6 +122,36 @@ python -m pytest tests/ -q
 | `test_gradient_flows` | 梯度可回流到 WAM latent（Stage 3 虽冻结 E，通路必须存在） |
 | `test_param_count_small` | 小头定位：<1M 参数 |
 | `test_rejects_wrong_token_count` | 非 grid² 输入直接报错 |
+
+## tests/test_dataset.py — RoboMIND 数据集 + 深度监督策略 + 动作预处理
+
+合成 HDF5（JPEG color + PNG depth + 状态曲线，复刻 Franka schema：
+臂曲线 8 维、EE 1 维），不依赖真实数据。
+
+| 测试 | 覆盖作用 |
+|---|---|
+| `test_discovery_and_length` | episode 目录布局发现正确；数据集长度 = 总帧数；任务列表字典序确定 |
+| `test_tasks_filter` | tasks 白名单过滤（MatchedView 的机制基础） |
+| `test_locate_mapping` | 全局帧索引 → (episode, frame) 映射逐点正确，越界报错 |
+| `test_sample_schema_and_labels` | 样本字段齐全：rgb 归一化 CHW、depth/mask 原始分辨率、action/proprio 各 **16 维**、domain/task/episode/frame 标签、is_intervene 透传 |
+| `test_depth_raw_passthrough_and_unique_mask_rule` | 默认策略：深度原始值直通无变换；唯一掩码规则（0 洞、超量程、**65535 哨兵**均无效） |
+| `test_action_proprio_concat_order_and_arm_slice` | 动作=master、本体感=puppet、固定 [左臂7, 右臂7, 左爪, 右爪] 拼接顺序；**8 维臂曲线裁前 7 维**（real arm_align 的第 8 维夹爪不进关节段） |
+| `test_missing_camera_fails_loud` | 配置的相机在文件中不存在时构造期即报错并列出可用相机（防静默读错路） |
+| `test_color_channel_flag_respected` | 通道序标记从文件读取（real=rgb / sim=bgr，两域不同，禁止统一假设） |
+| `test_raw_supervision_direct` | RawDepthSupervision 单元语义：开区间边界 + NaN 均无效，深度直通 |
+| `test_preprocessor_dims_and_missing_curve` | 维数推导 (16,16)；缺曲线时报错并提示检查 config |
+
+## tests/test_image.py — RGB 预处理（方案 B'：统一填黑补 1:1）
+
+| 测试 | 覆盖作用 |
+|---|---|
+| `test_letterbox_bounds_16_9_patch_aligned` | 16:9（两域俯视相机）内容恰 9 行 patch，上 3 下 4 行黑边——填黑几何钉死 |
+| `test_letterbox_bounds_4_3_and_square` | 4:3（腕部）与方形输入的填黑几何同样 patch 对齐 |
+| `test_image_size_must_be_patch_multiple` | image_size 不被 patch 整除时构造即报错 |
+| `test_output_spec_black_bars_and_normalization` | 输出 (3,S,S) float32；内容区与黑边区的 ImageNet 归一化数值分别正确 |
+| `test_domain_symmetric_treatment` | **裁决核心的可执行约束**：同一 16:9 内容两次处理逐位一致、黑边占比恒定 7/16——预处理不引入域标签 |
+| `test_full_fov_preserved` | **方案 B' 相对裁剪方案的关键性质**：画面左右边缘内容不丢（real 俯视杯架贴边的实测需求） |
+| `test_dataset_uses_preprocessor` | dataset 端到端接入：16:9 经方案 B' 后 (3,S,S)、内容/黑带语义正确 |
 
 ## tests/test_integration.py — 端到端冒烟
 | 测试 | 覆盖作用 |

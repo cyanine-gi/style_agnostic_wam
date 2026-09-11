@@ -1,4 +1,4 @@
-"""三个预训练模型的统一推理冒烟测试:教师(DA-V2-L)、编码器(DINOv2-B)、VLM(Qwen3-VL-2B)。
+"""三个预训练模型的统一推理冒烟测试:教师(DA-V2-L)、编码器(DINOv2-S/14-reg)、VLM(Qwen3-VL-2B)。
 
 模型路径与选择全部读自 configs/model.yaml(guideline §11.2)。在同一条 real
 episode 的同一帧上测三个模型,输出:
@@ -6,7 +6,7 @@ episode 的同一帧上测三个模型,输出:
 - teacher: 稠密深度推理,与 GT 深度并排存图(重点:GT 洞内教师是否给出合理
   值),并测 batch8@518 吞吐,用于校准全量教师离线推理的时长估算;
 - encoder: 验证 patch token 形状(patch14 -> 224px 输入应 1+16x16=257 tokens
-  @ 768 维),这是 Stage 0 attention pooling 的输入;
+  @ 384 维),这是 Stage 0 attention pooling 的输入;
 - vlm: 图像描述一轮,验证 图像编码->对齐->生成 全链路。
 
 用法: python scripts/test_pretrained_models.py [--hdf5 PATH] [--frame 500]
@@ -26,16 +26,21 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "outputs" / "introspect" / "pretrained_models_test.png"
 
-DEFAULT_HDF5 = ("data/RoboMIND2.0-Tienkung/data/tienkung/tidy_desktop/"
-                "success_episodes/0115_153224/data/trajectory.hdf5")
+DEFAULT_HDF5 = ("data/RoboMIND2.0-Franka-Part-1/data/franka/hang_cup_on_cup_holder/"
+                "success_episodes/0520_104333/data/trajectory.hdf5")
 
 
 def load_frame(path: str, idx: int):
     with h5py.File(path, "r") as f:
-        cbuf = f["camera_observations/color_images/camera_top"][idx]
-        dbuf = f["camera_observations/depth_images/camera_top"][idx]
-    rgb = cv2.cvtColor(cv2.imdecode(np.frombuffer(cbuf, np.uint8), cv2.IMREAD_COLOR),
-                       cv2.COLOR_BGR2RGB)
+        cbuf = f["camera_observations/color_images/camera_front"][idx]
+        dbuf = f["camera_observations/depth_images/camera_front"][idx]
+        # Franka real 的 camera_color_channel=rgb：写入前就是 RGB 数组，
+        # imdecode 输出已是 RGB，不能再 BGR→RGB 反转（见 dataset.decode_color）
+        ch = f["camera_color_channel/camera_front"][()].decode() \
+            if "camera_color_channel/camera_front" in f else "bgr"
+    rgb = cv2.imdecode(np.frombuffer(cbuf, np.uint8), cv2.IMREAD_COLOR)
+    if ch == "bgr":
+        rgb = cv2.cvtColor(rgb, cv2.COLOR_BGR2RGB)
     gt = cv2.imdecode(np.frombuffer(dbuf, np.uint8), cv2.IMREAD_UNCHANGED)
     return rgb, gt
 
@@ -86,9 +91,8 @@ def test_teacher(cfg, rgb, gt, device):
     hole_std = pred[holes].std() if holes.any() else float("nan")
     print(f"[teacher] batch8@{size}: {dt*1000:.0f} ms/iter = {fps:.1f} fps, "
           f"peak VRAM {vram:.2f} GiB")
-    n_frames = 3.4e6
-    print(f"[teacher] 全量 ~3.4M 帧估算: {n_frames / fps / 3600:.1f} h "
-          f"(隔 3 帧推理约 {n_frames / 3 / fps / 3600:.1f} h)")
+    n_frames = 1.45e5  # Franka 两域合计 ~14.5 万帧（2026-09-11 实测）
+    print(f"[teacher] 全量 ~{n_frames/1e4:.1f} 万帧估算: {n_frames / fps / 3600:.1f} h")
     print(f"[teacher] GT 洞占比 {holes.mean()*100:.1f}%, 洞内教师预测 std={hole_std:.4f} "
           f"(>0 说明教师在洞内给出了有变化的合理值,不是常数)")
 
@@ -122,7 +126,7 @@ def test_encoder(cfg, rgb, device):
     h, w = inputs["pixel_values"].shape[-2:]
     expect = 1 + (h // patch) * (w // patch)
     ok = "OK" if N == expect else "MISMATCH"
-    print(f"[encoder] DINOv2-B {n_params/1e6:.0f}M params, tokens {tuple(out.last_hidden_state.shape)} "
+    print(f"[encoder] DINOv2-S {n_params/1e6:.0f}M params, tokens {tuple(out.last_hidden_state.shape)} "
           f"(输入 {h}x{w}, patch{patch} -> 预期 {expect} tokens, {ok})")
     print(f"[encoder] peak VRAM {torch.cuda.max_memory_allocated() / 2**30:.2f} GiB")
     del model

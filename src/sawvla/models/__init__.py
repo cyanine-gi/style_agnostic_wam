@@ -1,4 +1,4 @@
-"""世界模型网络模块（guideline v2 §2.3 / 隐空间与深度监督设计 §7/§8）。
+"""世界模型网络模块（guideline v2 §2.3 / 隐空间与监督设计 §7/§8）。
 
 - encoder:        DINOv2-S/14-registers 初始化，全程可微调，输出 16×16 patch token
 - action_adapter: 动作块 + 本体感 → 条件 token（只进 T，不进 E）

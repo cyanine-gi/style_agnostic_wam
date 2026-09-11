@@ -20,8 +20,9 @@
 
 ### 0.2 数据
 
-- **真实域**：RoboMIND2.0-Tienkung（天工人形机器人，真实环境采集；据官方信息为动捕遥操作、HDF5 统一格式，深度来自消费级 RGB-D 传感器，**存在大量空洞与噪声**）。
-- **仿真域**：RoboMIND2.0-Tienkung-sim（同一机器人在仿真环境完成任务；深度完美稠密）。
+- **真实域**：RoboMIND2.0-Franka-Part-1（双臂 Franka 工作站，真实环境采集，HDF5 统一格式，深度来自 RealSense D435if，**存在空洞与噪声**，洞集中在深色机械臂本体）。
+- **仿真域**：RoboMIND2.0-Franka-sim（同款双臂 Franka 在仿真环境完成同一任务；深度完美稠密，带全套相机内外参）。
+- **2026-09-11 数据集切换（用户裁决）**：默认数据集从 Tienkung（天工人形）切换为 Franka——同机器人、同 matched 任务（hang_cup_on_cup_holder）、EE 同构的"完美对应"数据，必须在完美对应的数据上做才有意义；Tienkung 归档，后续有空再议。
 - 两份数据集**已下载到本机**，路径通过环境变量 `ROBOMIND_ROOT` 定位，禁止联网重复下载。
 
 ### 0.3 核心难点
@@ -37,7 +38,7 @@
 | OS | Ubuntu 24.04 LTS |
 | GPU | 单卡 RTX 4070 Ti Super，**16GB 显存**，Ada Lovelace（支持 bf16 / FlashAttention-2） |
 | VL 基模 | `Qwen/Qwen3-VL-2B-Instruct`（视觉塔 SigLIP2-Large ≈300M，2×2 merger 压缩视觉 token，DeepStack，动态分辨率；精确配置以本地 `config.json` 为准） |
-| 数据集 | RoboMIND2.0-Tienkung + RoboMIND2.0-Tienkung-sim，本地已下载 |
+| 数据集 | RoboMIND2.0-Franka-Part-1 + RoboMIND2.0-Franka-sim，本地已下载 |
 | 精度策略 | 全链路 bf16 混合精度；优化器状态必要时 8-bit |
 
 16GB 显存的推论（违反将导致 OOM，务必遵守）：
@@ -113,10 +114,10 @@
 
 ### 2.3 模块规格（默认值，可调）
 
-> T 与 D 的逐层结构、参数-数据匹配论证与算力时间预算，见《隐空间与深度监督设计.md》§7/§8/§9。
+> T 与 D 的逐层结构、参数-数据匹配论证与算力时间预算，见《隐空间与监督设计.md》§7/§8/§9。
 
 - **E**：DINOv2-S/14（registers 版，d=384，~22M）初始化，224×224 输入 → 16×16=256 patch token；**初始化后全程可微调，禁止冻结**（理由见 §2.2）。Stage 0 用低 lr（≤1e-4）并加**防漂移锚**：保留一份冻结 DINOv2 副本，对 E 的输出加小权重特征蒸馏正则（或 EMA 约束），防止深度监督把 SSL 通用先验冲掉；同时监控 SSL 通用性探针与深度探针双指标。显存富余可升 ViT-B/14。消融项：SigLIP2（Qwen3-VL 视觉塔）初始化、MAE/VC-1 初始化、随机初始化。
-- **T**：默认 8 层 Transformer、d=384（~20M 参数，上限 ≤100M；参照：DINO-WM predictor 19M/6 层，V-JEPA 2-AC predictor 300M/24 层/d1024/block-causal），**一律随机初始化从零训练**——没有现成权重匹配本项目动作空间，所有路线（含 V-JEPA 2-AC）均如此。输入 = z_t 的 256 个 patch token + 1 个本体感 token + k 个逐步动作 token（**每步动作向量独立 MLP 升为 1 个 token，k 步 = k 个 token，禁止整块压缩**——逐步 token 的因果语义干净，第 j 步预测只能 attend a_{≤j}，详见 `overall_tensor_flow.md` §1.2/§3.2；动作维数 `[待本地核实]`，天工双臂预计 2×(7DoF+gripper) 量级）。uv 绑定按 §2.1：patch token 加 2D 位置编码，动作/本体感 token 只加时间维位置编码；条件方式默认 token 拼接 + AdaLN 二选一，做消融。**frameskip**：数据处理引入帧跳参数（DINO-WM 做法），避免相邻帧过于相似导致平凡复制解；训练时可选**动态区域损失加权**（按相邻帧 latent 差加权），防止容量浪费在静止背景。
+- **T**：默认 8 层 Transformer、d=384（~20M 参数，上限 ≤100M；参照：DINO-WM predictor 19M/6 层，V-JEPA 2-AC predictor 300M/24 层/d1024/block-causal），**一律随机初始化从零训练**——没有现成权重匹配本项目动作空间，所有路线（含 V-JEPA 2-AC）均如此。输入 = z_t 的 256 个 patch token + 1 个本体感 token + k 个逐步动作 token（**每步动作向量独立 MLP 升为 1 个 token，k 步 = k 个 token，禁止整块压缩**——逐步 token 的因果语义干净，第 j 步预测只能 attend a_{≤j}，详见 `overall_tensor_flow.md` §1.2/§3.2；动作维数 `[已核实 2026-09-11，Franka]`：双臂 7DoF 关节位置 + 双夹爪 = **16 维**（action=master 指令、proprio=puppet 实测，两域同构；夹爪已裁决纳入，方向两域一致：高=抓握；详见 configs/data.yaml curves 段与 dataloader.md §12.4/12.5）。uv 绑定按 §2.1：patch token 加 2D 位置编码，动作/本体感 token 只加时间维位置编码；条件方式默认 token 拼接 + AdaLN 二选一，做消融。**frameskip**：数据处理引入帧跳参数（DINO-WM 做法），避免相邻帧过于相似导致平凡复制解；训练时可选**动态区域损失加权**（按相邻帧 latent 差加权），防止容量浪费在静止背景。
   > **[已裁决 2026-09-11]** 动作 token 化采用逐步 token（每步 1 个，不整块压缩）；T 的因果语义按 `overall_tensor_flow.md` §3.2（block-causal，禁止看未来动作），因果泄漏单测（§3.4）必须实现。模块边界原则：**WAM 模块（E/T/D）不感知 VLA 内部实现**；是否压缩、如何压缩是 VLA 侧 adapter 的内部事务，WAM 对外接口恒定输出 256 个 patch token。
 - **D**：轻量 DPT 式上采样头，双头输出 `(μ, log σ)`。输入只允许 z（§2.2）；输出 64×64（上限 112×112）；可选在入口拼接归一化 uv 坐标通道。
 - **Domain Discriminator**：patch token → 1×1 conv 降维 → 全局池化 + 3 层 MLP，二分类（real/sim）。容量刻意做小（~1M），防止判别器过强导致 GRL 训练不稳。
@@ -143,11 +144,13 @@
 3. 抽样可视化：RGB、深度、深度有效性掩码、洞的空间分布（确认洞与物体材质的相关性，这决定 §5 的必要性判断）；
 4. 产出 `docs/data_schema.md` 与 `configs/data.yaml`，后续所有 dataloader 以此为唯一事实来源。
 
+> **进度（2026-09-11，Franka 切换后）**：主体已完成并落入 configs/data.yaml——相机两域统一 camera_front（1280×720 16:9；**后发现两域该机位视角不一致：real 主批次斜视 / sim 近垂直顶视，处理待裁决**，见 dataloader.md §12.9），深度 uint16 毫米（real 有洞、65535 哨兵；sim 稠密、同哨兵），动作/本体感 = master/puppet 双臂 7DoF 关节 + 双夹爪（**16 维**，两域同构，EE 已裁决纳入），episode/任务数与帧量已核实（real 300 eps / 8.8 万帧，sim 319 eps / 5.7 万帧，§9.1）。**未完成**：registration 状态（sim 有内外参、real 无）、洞-材质相关性可视化（第 3 条，Franka 侧初查：洞集中在深色机械臂本体）、`docs/data_schema.md` 正式落档。
+
 ### 4.2 离线预处理（一次性，产出缓存）
 
 按顺序执行，全部产物落盘为 WebDataset/LMDB shard（避免训练时重复解码 HDF5）：
 
-1. **抽帧与对齐**：RGB + 深度 + 动作 + 本体感按时间戳对齐；统一 resize 到 224×224（深度用最近邻，掩码同步缩放）；按 frameskip 参数采样帧对/帧段。
+1. **抽帧与对齐**：RGB + 深度 + 动作 + 本体感按 `_align` 对齐序列同索引对齐（Franka real 时间戳已损坏，见 dataloader.md §12.2）；RGB 按方案 B' 填黑补 224×224（dataloader.md §5，**深度/掩码离线产物施加相同填黑几何**，填黑区 mask=0）；按 frameskip 参数采样帧对/帧段。
 2. **有效性掩码**：`M = isfinite(d) & (d > d_min) & (d < d_max)`，`d_min/d_max` 取传感器量程（introspection 确认）。**只此一条规则，禁止额外手工规则**（§附）。
 3. **时序中值补背景**（近乎零成本的白送增益）：桌面场景大面积静止，对同一相机位姿的静止片段做逐像素跨帧中值，得到干净背景深度，用于填充静态区空洞；动态区（机械臂、被抓物体）不补，交给教师监督。
 4. **教师伪深度**：Depth Anything V2-L 离线推理全部帧（两域同一 checkpoint），输出相对深度，per-frame 存 uint16 量化 disparity；batch 8 @ 518px，16GB 可放下。
@@ -205,6 +208,7 @@ L_smooth  = mean_{M=0}( |∇μ| · exp(−|∇rgb|) )                # RGB 边�
 ### Stage 0：静态几何重建（当前帧 z_t → 当前帧深度）
 
 - 训练 E + D（σ 头在内），损失 = `L_depth`。**此阶段深度损失正常反传进 E**（它是 E 的唯一塑形信号）。
+- **训练脚本 [已实现 2026-09-11]**：`scripts/train_stage0.py`——ConcatDataset(FrankaReal+FrankaSim) 单帧，在线 disparity 监督（OnlineDisparitySupervision，λ_teacher=0 mask-only 基线，教师产物未生成前的临时路径，裁决记录见 depth_gt_supervision.md §3），防漂移锚（冻结副本 + 0.1 蒸馏），bf16，episode 级 crc32 确定性 train/val 划分（划分表落盘前的临时实现），周期 val + 可视化 + checkpoint。冒烟 30 步已跑通（outputs/stage0_smoke/）。
 - 默认超参：AdamW，lr 1e-4（DINOv2 预训练初始化，低于从零训练的 3e-4 量级），cosine，wd 0.05，bf16，batch 32（累积等效 64），224px。
 - 防漂移锚生效中（§2.3-E），蒸馏正则小权重起步。
 - 显存估算：DINOv2-S + DPT 头 ≈ 6–8GB，安全。
@@ -222,7 +226,7 @@ L_smooth  = mean_{M=0}( |∇μ| · exp(−|∇rgb|) )                # RGB 边�
   ```
   frameskip 与动态区域加权生效（§2.3-T）。
 - 共享 D 同时解码 z_t 与 ẑ_{t+1}，**解码损失对 E、T 一律 stop-gradient**（只更新 D；理由见 §2.2）。
-- **隐空间离线缓存**：E 冻结后，先把全部帧的 z 一次性前向缓存落盘（约 35 万帧 × 256×384×bf16 ≈ 70GB 磁盘），T 训练直接读缓存 latent——编码开销从每步摊销变为一次性，Stage 1 提速约 3 倍。
+- **隐空间离线缓存**：E 冻结后，先把全部帧的 z 一次性前向缓存落盘（`[已核实 2026-09-11，Franka]` 两域合计约 14.5 万帧 × 256×384×bf16 ≈ **28GB** 磁盘，全量缓存无压力，原"全量 vs 子集"待裁决项随之消失），T 训练直接读缓存 latent——编码开销从每步摊销变为一次性，Stage 1 提速约 3 倍。
 - lr 1e-4，8 帧片段 batch 8–16，梯度检查点。显存 ≈ 8–12GB。
 - **验收门**：1/4/8 步 latent 预测误差曲线平滑无发散；预测帧深度（D(ẑ)）在 val 上可视化合理；多步展开无塌缩（z 范数稳定）。
 
@@ -312,18 +316,18 @@ L_smooth  = mean_{M=0}( |∇μ| · exp(−|∇rgb|) )                # RGB 边�
 
 ### 9.1 算力假设与训练时间预算
 
-算力假设：4070 Ti Super BF16 dense 峰值 88.2 TFLOPS、显存带宽 672 GB/s；有效算力按 25–35 TFLOPS（MFU 25–40%）估算。模块级 FLOPs 推导见《隐空间与深度监督设计.md》§9。
+算力假设：4070 Ti Super BF16 dense 峰值 88.2 TFLOPS、显存带宽 672 GB/s；有效算力按 25–35 TFLOPS（MFU 25–40%）估算。模块级 FLOPs 推导见《隐空间与监督设计.md》§9。
 
 | 环节 | 总时间估算 |
 |---|---|
-| 教师深度离线推理（~32 万图，DA-V2-L） | 1.5–2.5 h |
-| 隐空间缓存（Stage 1 前置，全帧 E 前向） | 0.5–1 h |
+| 教师深度离线推理（~14.5 万图 `[已核实 2026-09-11，Franka]`，DA-V2-L） | ~0.5–1 h |
+| 隐空间缓存（Stage 1 前置，全帧 E 前向） | <0.5 h |
 | Stage 0（~100K 步，batch32） | 4–8 h |
 | Stage 1（~150K 步，读缓存 latent） | 4–12 h |
 | Stage 2（~80K 步，联合+GRL） | 3–8 h |
 | Stage 3（Qwen3-VL-2B LoRA，40–80K 步） | 1–2 天 |
 
-**Stage 0–2 合计约 1 天，全项目 2–3 天 GPU。** 数据量前提：真机 217GB ≈ 25万–45万帧、仿真 11.5GB ≈ 1.5万–4万帧 `[待本地核实]`；域不平衡 ≈15:1，GRL batch 强制 50/50 域均衡。可行前提：Stage 1 走缓存 latent；Stage 3 严格 LoRA + 冻结；数据管线用预处理 shard + 多 worker 预取。
+**Stage 0–2 合计约 1 天，全项目 2–3 天 GPU（教师离线推理在实测数据量下已不足 1 小时）。** 数据量前提 `[已核实 2026-09-11，Franka]`：真机 100GB / 300 success episodes / **8.8 万帧**，仿真 48GB / 319 success episodes / **5.7 万帧**，合计约 14.5 万帧；域比例 real:sim ≈ **1.6:1**（轻度不平衡，DomainBalancedSampler 仍强制 50/50）；两域同一 matched 任务（hang_cup_on_cup_holder），全库即 matched。可行前提：Stage 1 走缓存 latent（28GB 落盘，磁盘充裕）；Stage 3 严格 LoRA + 冻结；数据管线用预处理 shard + 多 worker 预取。
 
 ---
 
@@ -413,7 +417,7 @@ project/
 - Scale-and-shift invariant 深度损失（MiDaS）：https://arxiv.org/abs/1907.01341
 - 多尺度梯度损失（Eigen et al.）：https://arxiv.org/abs/1406.2283
 - Qwen3-VL（VL 基模）：https://github.com/QwenLM/Qwen3-VL
-- RoboMIND 2.0 数据集（ModelScope）：`X-Humanoid/RoboMIND2.0-Tienkung`、`X-Humanoid/RoboMIND2.0-Tienkung-sim`
+- RoboMIND 2.0 数据集（ModelScope）：`X-Humanoid/RoboMIND2.0-Franka-Part-1`（real）、`X-Humanoid/RoboMIND2.0-Franka-sim`（sim）；Tienkung 版已归档（2026-09-11 切换）
 
 ---
 
