@@ -19,7 +19,18 @@ encoder:
   lr: 1.0e-4           # 预训练初始化，低于从零训练的 3e-4 量级
   anti_drift:
     enabled: true      # 防漂移锚：冻结 DINOv2 副本 + 小权重特征蒸馏正则
-    distill_weight: 0.1  # 小权重起步，按 SSL 探针监控回调
+    distill_weight: 0.1  # 小权重起步，按 SSL 探针监控回调；覆盖 patch+register 全槽位
+  # 2026-09-14 裁决：register 分角色（初始化对称，纯约定 + 损失塑形）
+  register_roles:
+    domain: [0, 1]     # 域信息槽位：被动锚定携带域信息 + 探针监控（先量后治）
+    agnostic: [2, 3]   # 域无关槽位：全局信号头只读这里；Stage 2 GRL 只挂这里
+
+# 可插拔监督信号注册表（src/sawvla/signals/，用法见 base.py docstring）：
+# 新增信号 = SignalHead 子类 + @register_signal + 此处加一行，trainer 不动
+signals:
+  joint_pos:
+    enabled: true      # 双臂关节位置回归 14 维（剔除夹爪：sim 连续 / real 二值不同纲）
+    weight: 0.1        # 小权重起步，按 signals/joint_pos 曲线回调
 
 transition:
   d: 384
@@ -30,12 +41,31 @@ transition:
   mlp_ratio: 4.0
   action_tokens: per_step  # 已裁决 2026-09-11：每步动作 1 token，k 步=k token，禁止整块压缩
   n_cond: 2            # 每帧条件 token 数：1 本体感 + 1 动作（逐帧 block 交错）
+  n_reg: 4             # [已裁决 2026-09-15] register 通道由 T 递推：block = 256 patch + 4 register + 2 cond
   causal: block        # block-causal：第 j+1 帧预测只见 a_{≤j}（overall_tensor_flow §3.2）
   max_frames: 16       # 帧索引 embedding 表大小（多步展开上限）
   frameskip: [1, 2, 4, 8]  # 训练时随机采样，避免平凡复制解
   unroll_steps: [1, 2, 4]  # 多步展开损失步数
   dyn_weight: true     # 动态区域损失加权（按相邻帧 latent 差）
   lr: 1.0e-4
+
+# Stage 1 训练（scripts/train_stage1.py；2026-09-15 裁决定稿）
+stage1:
+  cache_dir: outputs/latent_cache   # scripts/build_latent_cache.py 产物
+  context_frames: 2      # [已裁决] 滑窗上下文 2 帧（速度可观测下限；1 帧盲于物体动量）
+  unroll_steps: 4        # 固定最大展开 4 步、逐步监督（等效覆盖 k∈{1,2,4}）
+  clip_stride: 1         # 保留帧流上的帧跳（>1 等价 frameskip；抽稀已承担主要角色）
+  batch: 8
+  lr: 1.0e-4
+  reg_dyn_weight: 1.0    # register 通道 L_dyn 权重（r̂ 监督，与 patch 并列）
+  # 预测端监督对等（2026-09-15 裁决："T 预测输出与 E 编码输出尽量不可分辨，
+  # 深度、joint_pos 及未来注册的其他 loss 都要有"）：
+  signals_on_prediction:
+    enabled: true        # 注册信号同时挂 r̂/ẑ（与 E 侧同一批头、同一权重）
+    grad_into_t: true    # 选项 A：信号梯度进 T（塑形 r̂）；false = 未来选项 C 消融
+  depth_on_prediction:
+    enabled: true        # D 同时解码 ẑ（训练 D + 监控预测帧深度）
+    grad_into_t: false   # 选项 A：深度对 T 保持 stop-grad（DINO-WM 消融惯例，§2.2）
 
 depth_decoder:
   out_size: 64         # 64×64（上限 112×112）；满分辨率仅评估/可视化

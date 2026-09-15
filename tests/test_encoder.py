@@ -49,3 +49,14 @@ def test_freeze_unfreeze(encoder):
 def test_param_count(encoder):
     n = sum(p.numel() for p in encoder.parameters()) / 1e6
     assert 20 < n < 25                        # DINOv2-S ≈ 22M
+
+
+def test_forward_tokens_channels(encoder):
+    """三通道接口（register 分区裁决 2026-09-14）：cls / registers / patch。"""
+    tok = encoder.forward_tokens(torch.randn(2, 3, 224, 224))
+    assert tok["cls"].shape == (2, 384)
+    assert tok["registers"].shape == (2, 4, 384)
+    assert tok["patch"].shape == (2, 256, 384)
+    # forward 与 forward_tokens 的 patch 通道必须一致
+    z = encoder(torch.randn(1, 3, 224, 224))
+    assert z.shape == (1, 256, 384)

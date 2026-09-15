@@ -12,7 +12,9 @@ robot: franka_dual
 env:
   num_envs: 1
   episode_length_s: 12.0
-  decimation: 2            # 控制频率 = 60Hz sim / 2 = 30Hz（对齐 RoboMIND 30Hz）
+  # 控制频率 15Hz（2026-09-15 裁决：对齐 RoboMIND Franka real 名义 15fps/66.6ms；
+  # Franka-sim 数据是 30fps，训练帧流统一抽帧到 15fps，本环境直接以 15Hz 产出）
+  decimation: 4            # 控制频率 = 60Hz sim / 4 = 15Hz（Δt = 66.7ms）
   sim_dt: 0.0166667        # 60 Hz
 
 # 高置固定全局相机（世界系，pos + look_at 直白调参）

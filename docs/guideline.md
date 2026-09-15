@@ -16,13 +16,14 @@
 2. **递推**：在隐空间内，以时序动作条件注入的转移模型预测下一帧隐空间表达；
 3. **几何可读**：隐空间向量可解码出（下一帧的）稠密深度图；
 4. **服务 VLA**：隐空间表达后续用于指导 VLA（Vision-Language-Action）策略；
-5. **域隔离**：以"深度"为隔离层，使隐空间不携带"RGB 来自仿真域还是真实域"的信息，辅以域对抗训练（GRL）消灭残余域信息。动机：任务执行与 RGB 画质无关，模型应关注物体几何本身；避免 photo-realistic 图像生成的代价及生成不完美对特征提取的负面影响。
+5. **域隔离**：以"深度"为隔离层，使隐空间不携带"RGB 来自仿真域还是真实域"的信息；辅以 register 分区（域信息给指定槽位居住，§2.4）与针对性 GRL（只清域无关槽位，Stage 2），并以三通道域探针量化披露残余泄漏。动机：任务执行与 RGB 画质无关，模型应关注物体几何本身；避免 photo-realistic 图像生成的代价及生成不完美对特征提取的负面影响。
 
 ### 0.2 数据
 
 - **真实域**：RoboMIND2.0-Franka-Part-1（双臂 Franka 工作站，真实环境采集，HDF5 统一格式，深度来自 RealSense D435if，**存在空洞与噪声**，洞集中在深色机械臂本体）。
 - **仿真域**：RoboMIND2.0-Franka-sim（同款双臂 Franka 在仿真环境完成同一任务；深度完美稠密，带全套相机内外参）。
 - **2026-09-11 数据集切换（用户裁决）**：默认数据集从 Tienkung（天工人形）切换为 Franka——同机器人、同 matched 任务（hang_cup_on_cup_holder）、EE 同构的"完美对应"数据，必须在完美对应的数据上做才有意义；Tienkung 归档，后续有空再议。
+- **采样率（2026-09-15 用户核实裁决）**：real 名义 **15fps**（66.6ms；时间戳已损坏，名义值是唯一可信口径，见 dataloader.md §12.2）；sim **30fps** ⇒ 训练帧流统一 15fps，sim 侧直接抽帧（每 2 帧取 1，不在位置编码上做区分）；自建仿真环境（src/simulation）控制频率同步设为 15Hz（simulation.yaml `decimation: 4` @ 60Hz 物理步，Δt=66.7ms）。
 - 两份数据集**已下载到本机**，路径通过环境变量 `ROBOMIND_ROOT` 定位，禁止联网重复下载。
 
 ### 0.3 核心难点
@@ -53,8 +54,8 @@
 
 ```
                 ┌────────────────────────────────────────────┐
- RGB_t ───────► │ Visual Encoder E (DINOv2-S/14, patch tokens)│ ──► z_t  (16×16×384 连续 latent)
- RGB_{t+1} ───► │  （同一 Encoder，推理时只跑当前帧）           │ ──► z_{t+1}（仅训练时用作监督目标）
+ RGB_t ───────► │ Visual Encoder E (DINOv2-S/14-registers)   │ ──► z_t patch (16×16×384，局部通道)
+ RGB_{t+1} ───► │  （同一 Encoder，推理时只跑当前帧）           │ ──► r_t registers (4×384，全局槽位，§2.4)
                 └────────────────────────────────────────────┘
                                   │
         action_t ──► Action Adapter (MLP→action tokens) ──► ┌───────────────┐
@@ -64,12 +65,17 @@
                                   │                                    │
                 ┌─────────────────▼──────────────┐   ┌────────────────▼─────────────┐
                 │ Depth Decoder D（共享，仅接 z） │   │ Domain Discriminator（GRL）   │
-                │ 输入 z_t 和 ẑ_{t+1}，输出 64×64│   │ 同时判别 z_t 与 ẑ_{t+1}       │
-                │ 稠密 (μ, σ)                    │   │ 梯度反转进 E 和 T             │
+                │ 输入 z_t 和 ẑ_{t+1}，输出 64×64│   │ 只挂 reg_agnostic 通道（§2.4）│
+                │ 稠密 (μ, σ)                    │   │ Stage 2 上线，梯度反转进 E    │
                 └────────────────────────────────┘   └───────────────────────────────┘
                                   │
                 VLA 阶段：z_t / ẑ 经 Adapter 注入 Qwen3-VL-2B（§8）
 ```
+
+> 记号约定：下文 `z` 一律指 **patch 通道**（局部、2D 网格）；`r` 指 **register 通道**
+> （全局槽位）。T 递推 register 通道已裁决（2026-09-15：每步同时预测 ẑ 与 r̂，
+> 见 §6-Stage 1）；WAM 对 VLA 的输出接口仍是恒定的 256 个 patch token，
+> register 通道是否进 VLA 留 Stage 3 裁决。
 
 ### 2.1 隐空间规格与 uv 绑定（本项目的量化权衡结论）
 
@@ -97,6 +103,9 @@
 - 绑定的常规载体是位置编码而非坐标通道；如需更强绑定：解码器入口可拼接归一化 uv 坐标通道（帮助深度边缘对齐）；多相机 setup 必须加 camera embedding token。
 - 动作/本体感是全局量，只加时间维位置编码（V-JEPA 2-AC 做法），不携带空间编码，通过注意力/AdaLN 调制 patch token。
 
+**patch 网格不是隐空间的全部**：E 的输出还有 4 个 register token（全局槽位通道），
+其角色划分与消费纪律见 §2.4——局部信息走 patch、全局信息走 register，两通道分离。
+
 ### 2.2 关键设计决策（已定，含理由）
 
 | 决策 | 选择 | 理由 |
@@ -108,7 +117,8 @@
 | 深度解码器输入 | **只允许 z，禁止 encoder 中间层 skip connection** | 若带 skip，深度走 RGB 捷径，z 的几何含量探针失效，"几何在隐空间"的整个论证崩塌 |
 | 深度输出/监督分辨率 | **64×64（上限 112×112），不做满分辨率** | z 的空间信息上限是 16×16 网格，超过 ~4–7 倍上采样的内容纯属解码器幻觉，强监督满分辨率只会污染梯度并被 σ 吸收成噪声；DINO-WM 的 16× 上采样解码器也只用于可视化、不回传。满分辨率仅用于评估与可视化 |
 | 深度解码器共享与梯度 | 当前帧与预测帧共享同一个 D；动态阶段解码损失对 T/E **stop-gradient**（只训练 D 本身） | DINO-WM 消融：解码损失反传进预测器会显著伤害下游性能（PushT 0.80 vs 0.92）；静态阶段例外，见 §6 |
-| 域对抗位置 | 判别器同时作用在 `z_t`（E 的输出）与 `ẑ_{t+1}`（T 的输出），GRL 反转进 E、T | 递推后的隐空间同样携带域信息，只判当前帧会留缺口 |
+| 域对抗位置 | **GRL 只挂 reg_agnostic 通道**（register 分区，§2.4），patch 与其它槽位只探针监控、不对抗 | 硬去除纠缠的几何/机位信息必然误伤任务性能（过杀）；隔离优于摧毁——域信息给指定槽位（reg_domain）居住，下游按通道自选。T 已裁决递推 register（2026-09-15）⇒ ẑ 侧 reg_agnostic 通道同样挂 GRL |
+| register 分区 | 4 个 register 分角色：`[0,1]`=域信息槽位（被动锚定携带，不主动预测域），`[2,3]`=域无关槽位（全局信号头唯一读取处）；索引写在 model.yaml `encoder.register_roles` | 全局/局部分离：patch 已由深度损失显式塑形局部信息，register 天然是 12 层注意力的全局汇聚通道；分区让域信息有指定住所、可量化监控（探针读数=泄漏量），而不是满隐空间流窜 |
 | 深度教师 | Depth Anything V2-L（相对深度），离线对**两个域同一模型**推理，缓存稠密伪深度 | 同一教师 ⇒ 监督分布天然同域化；稠密 ⇒ 消除掩码不对称；相对深度 ⇒ 天然域不敏感 |
 | 变分正则 | 可选小权重 KL（β-VAE 式），默认关闭 | 先跑通确定性版本，出现后验塌缩/外推不稳再加 |
 
@@ -116,11 +126,47 @@
 
 > T 与 D 的逐层结构、参数-数据匹配论证与算力时间预算，见《隐空间与监督设计.md》§7/§8/§9。
 
-- **E**：DINOv2-S/14（registers 版，d=384，~22M）初始化，224×224 输入 → 16×16=256 patch token；**初始化后全程可微调，禁止冻结**（理由见 §2.2）。Stage 0 用低 lr（≤1e-4）并加**防漂移锚**：保留一份冻结 DINOv2 副本，对 E 的输出加小权重特征蒸馏正则（或 EMA 约束），防止深度监督把 SSL 通用先验冲掉；同时监控 SSL 通用性探针与深度探针双指标。显存富余可升 ViT-B/14。消融项：SigLIP2（Qwen3-VL 视觉塔）初始化、MAE/VC-1 初始化、随机初始化。
+- **E**：DINOv2-S/14（registers 版，d=384，~22M）初始化，224×224 输入 → 16×16=256 patch token；**初始化后全程可微调，禁止冻结**（理由见 §2.2）。完整序列 = 1 CLS + 4 register + 256 patch（261 token），出口三通道（cls / registers / patch，`forward_tokens`），消费纪律见 §2.4。Stage 0 用低 lr（≤1e-4）并加**防漂移锚**：保留一份冻结 DINOv2 副本，对 E 的 **patch + 全部 register** 输出加小权重特征蒸馏正则（CLS 无人消费、不锚；register 纳入锚定是 2026-09-14 裁决——锚只防漂移不除域，教师对两域输入的编码差异会被一致地保留为"教师格式"），防止深度监督把 SSL 通用先验冲掉；同时监控 SSL 通用性探针与深度探针双指标。显存富余可升 ViT-B/14。消融项：SigLIP2（Qwen3-VL 视觉塔）初始化、MAE/VC-1 初始化、随机初始化。
 - **T**：默认 8 层 Transformer、d=384（~20M 参数，上限 ≤100M；参照：DINO-WM predictor 19M/6 层，V-JEPA 2-AC predictor 300M/24 层/d1024/block-causal），**一律随机初始化从零训练**——没有现成权重匹配本项目动作空间，所有路线（含 V-JEPA 2-AC）均如此。输入 = z_t 的 256 个 patch token + 1 个本体感 token + k 个逐步动作 token（**每步动作向量独立 MLP 升为 1 个 token，k 步 = k 个 token，禁止整块压缩**——逐步 token 的因果语义干净，第 j 步预测只能 attend a_{≤j}，详见 `overall_tensor_flow.md` §1.2/§3.2；动作维数 `[已核实 2026-09-11，Franka]`：双臂 7DoF 关节位置 + 双夹爪 = **16 维**（action=master 指令、proprio=puppet 实测，两域同构；夹爪已裁决纳入，方向两域一致：高=抓握；详见 configs/data.yaml curves 段与 dataloader.md §12.4/12.5）。uv 绑定按 §2.1：patch token 加 2D 位置编码，动作/本体感 token 只加时间维位置编码；条件方式默认 token 拼接 + AdaLN 二选一，做消融。**frameskip**：数据处理引入帧跳参数（DINO-WM 做法），避免相邻帧过于相似导致平凡复制解；训练时可选**动态区域损失加权**（按相邻帧 latent 差加权），防止容量浪费在静止背景。
   > **[已裁决 2026-09-11]** 动作 token 化采用逐步 token（每步 1 个，不整块压缩）；T 的因果语义按 `overall_tensor_flow.md` §3.2（block-causal，禁止看未来动作），因果泄漏单测（§3.4）必须实现。模块边界原则：**WAM 模块（E/T/D）不感知 VLA 内部实现**；是否压缩、如何压缩是 VLA 侧 adapter 的内部事务，WAM 对外接口恒定输出 256 个 patch token。
 - **D**：轻量 DPT 式上采样头，双头输出 `(μ, log σ)`。输入只允许 z（§2.2）；输出 64×64（上限 112×112）；可选在入口拼接归一化 uv 坐标通道。
-- **Domain Discriminator**：patch token → 1×1 conv 降维 → 全局池化 + 3 层 MLP，二分类（real/sim）。容量刻意做小（~1M），防止判别器过强导致 GRL 训练不稳。
+- **Domain Discriminator**：reg_agnostic 通道（2×384 全局槽位，§2.4）→ 3 层 MLP，二分类（real/sim）。容量刻意做小（~1M），防止判别器过强导致 GRL 训练不稳。**patch 通道不做对抗**（隔离优于摧毁，§2.4），只挂探针监控。
+
+### 2.4 模块化边界：register 分区、可插拔信号与探针（2026-09-14 裁决）
+
+本节回答"模块化思路里**能插拔的是什么、不能替换的是什么**"。
+
+**三通道输出**（`DINOv2Encoder.forward_tokens`，单次前向）：
+
+| 通道 | 形状 | 角色 | 消费者 |
+|---|---|---|---|
+| `patch` | 256×384 | **局部通道**：2D 空间网格，深度可解码性的载体 | D（唯一输入）、T、VLA adapter |
+| `registers` | 4×384 | **全局槽位**：12 层注意力的天然全局汇聚通道 | 全局信号头、域探针、Stage 2 GRL |
+| `cls` | 384 | 闲置（无人消费、不锚定） | — |
+
+**register 分角色**（初始化对称，角色纯靠约定 + 损失塑形，索引可配）：
+
+- `[0,1]` **域信息槽位**：被动锚定携带域信息（教师对两域输入自然给出不同编码），**不主动加域分类损失**——先量后治，探针读数不够再升级；
+- `[2,3]` **域无关槽位**：**全局信号头的唯一读取处**；Stage 2 GRL 只挂这里。本体感、任务量等帧级全局信息的规定住所。
+
+**可插拔：监督信号注册表**（`src/sawvla/signals/`）。全局信号是插拔件，新增信号三步、trainer 零改动：① 写 `SignalHead` 子类（`reads` 指定读哪个通道 / `forward` / `target(batch)` / `loss`）；② `@register_signal("名字")`；③ model.yaml `signals` 节加一行（enabled / weight）。示例：做举杯任务就注册"杯到桌面高度"预测头，做自身状态监督就注册关节回归头。已注册首信号 **joint_pos**：双臂关节位置回归 14 维（**剔除夹爪**——sim 夹爪是连续行程、real EE 是二值开合，跨域不同纲；臂关节同为绝对关节角、跨域同纲，天然弱域对齐锚），读 reg_agnostic，weight 0.1。**预测端对等（2026-09-15 裁决）**：Stage 1 起信号同时挂 T 的预测输出（r̂/ẑ，与 E 侧同一批头同一权重），预测侧梯度进 T（选项 A，`stage1.signals_on_prediction`）；唯一例外是 T 不预测的 CLS——预测侧 ctx 的 CLS 置零，未来注册读 CLS 的信号需先裁决预测侧语义。
+
+**独立组件：域探针**（`DomainProbe`，刻意**不走**信号注册表：它是仪器不是损失，特征 detach、独立小优化器，梯度绝不进 E）。探针体系三档（2026-09-15 扩展），分工是三个不同的问题：
+
+- **mean-pool 线性**（三通道 patch / reg_domain / reg_agnostic，TB `probe/acc_*`）：域信息是否**平凡可读**（总量）。reg_domain 应高（设计上就是域信息的住所）；reg_agnostic 目标 ≈ 50%（Stage 2 GRL 的工作对象）；patch 是泄漏监控。
+- **逐 token 热图**（patch 通道 256 位置各一个独立线性头，不注意力路由；TB `probe/tok_acc_{mean,max}` 标量 + 每个 val 周期 val 集累计的 16×16 热图 `probe/patch_leak_map`）：域信息漏在**哪里**——区分画风泄漏（背景/光照区，良性）与内容泄漏（杯子/机械臂，危险）；已知局限：逐 token 各 55% 聚合后仍可 100%（冗余累积，不替代汇总读数），且测不到关系型泄漏（机位差异在 token 间相对配置里，由 register 通道兜住）。
+- 残差关系：attention 审计探针（上限档）暂未实现，需要时再加。
+
+设计动机（用户原话）："很难做到完全不含信息，但可以做到尽量少含信息，并且知道自己大概泄露了多少域信息，对下游用户的信心也有显著提升。"探针与 50% 的差值 = 该通道域信息含量的运营指标，全程记录进实验台账。
+
+**不可替换件（硬规格，改动即破坏项目论证）**：
+
+- patch 通道规格 256×384 与 uv 绑定（§2.1）——WAM 对外恒定接口；
+- E 全程可微调；D 只读 patch（禁 skip connection）；动作/本体感 16 维契约；
+- 分区纪律：全局信号只读 reg_agnostic（读 patch 会把局部几何泄进全局通道，读 reg_domain 会被域污染）；
+- 深度语义：z-depth、毫米、1mm 整数量化、无效=0（两域同纲，见 src/simulation/README.md 数据语义约定）。
+
+**可插拔件（换实现不动框架）**：全局信号头（注册表）、域探针、数据域子类（dataloader 按域各携规则）、仿真侧机器人（robots.py 注册表）与相机机位（simulation.yaml）、RL 后端（rl/facade.py 包装层，当前 rsl_rl）。
 
 ---
 
@@ -128,7 +174,7 @@
 
 - `d`：传感器深度（real 有洞有噪；sim 完美）。`M`：有效性掩码（1=有值）。
 - `t`：教师伪深度（两域均稠密）。`μ, σ`：解码器输出的预测深度与不确定性。
-- `z_t`：编码器输出；`ẑ_{t+1}`：转移模型预测；`sg(·)`：stop-gradient。
+- `z_t`：编码器 **patch 通道**输出（256×384，局部）；`r_t`：**register 通道**（4×384 全局槽位，角色见 §2.4）；`ẑ_{t+1}`：转移模型预测；`sg(·)`：stop-gradient。
 - 深度统一转为 **disparity（逆深度）** 空间计算损失（近处分辨率高，且与 scale-invariant 损失兼容）；存储用 uint16 量化。
 
 ---
@@ -208,7 +254,7 @@ L_smooth  = mean_{M=0}( |∇μ| · exp(−|∇rgb|) )                # RGB 边�
 ### Stage 0：静态几何重建（当前帧 z_t → 当前帧深度）
 
 - 训练 E + D（σ 头在内），损失 = `L_depth`。**此阶段深度损失正常反传进 E**（它是 E 的唯一塑形信号）。
-- **训练脚本 [已实现 2026-09-11]**：`scripts/train_stage0.py`——ConcatDataset(FrankaReal+FrankaSim) 单帧，在线 disparity 监督（OnlineDisparitySupervision，λ_teacher=0 mask-only 基线，教师产物未生成前的临时路径，裁决记录见 depth_gt_supervision.md §3），防漂移锚（冻结副本 + 0.1 蒸馏），bf16，episode 级 crc32 确定性 train/val 划分（划分表落盘前的临时实现），周期 val + 可视化 + checkpoint。冒烟 30 步已跑通（outputs/stage0_smoke/）。
+- **训练脚本 [已实现 2026-09-11；2026-09-14 扩展]**：`scripts/train_stage0.py`——ConcatDataset(FrankaReal+FrankaSim) 单帧，在线 disparity 监督（OnlineDisparitySupervision，λ_teacher=0 mask-only 基线，教师产物未生成前的临时路径，裁决记录见 depth_gt_supervision.md §3），防漂移锚（冻结副本 + 0.1 蒸馏，**覆盖 patch+register 全槽位**），bf16，episode 级 crc32 确定性 train/val 划分（划分表落盘前的临时实现），周期 val + 可视化 + checkpoint。**2026-09-14 扩展**：全局信号注册表上线（首信号 joint_pos 14 维，读 reg_agnostic，§2.4）；三通道域探针 DomainProbe 常驻监控（只量不治，§2.4/§7.3）。冒烟已跑通（outputs/stage0_smoke/）。
 - 默认超参：AdamW，lr 1e-4（DINOv2 预训练初始化，低于从零训练的 3e-4 量级），cosine，wd 0.05，bf16，batch 32（累积等效 64），224px。
 - 防漂移锚生效中（§2.3-E），蒸馏正则小权重起步。
 - 显存估算：DINOv2-S + DPT 头 ≈ 6–8GB，安全。
@@ -220,21 +266,33 @@ L_smooth  = mean_{M=0}( |∇μ| · exp(−|∇rgb|) )                # RGB 边�
 
 ### Stage 1：动作条件转移模型（z_t + a_t → ẑ_{t+1}）
 
+**2026-09-15 裁决定稿**：
+
+- **上下文 = 2 帧**（滑窗；1 帧对物体速度不可观测，2 帧是速度可观测下限；更长上下文留消融）；clip 采自运动抽稀帧流、**不跨 episode**。
+- **T 递推 register 通道**：每步同时预测 ẑ（patch）与 r̂（register，全局槽位随时间演化）；block = 256 patch + 4 register + 1 本体感 + 1 动作。
+- **自由展开（feed-back）**：上下文块带真值 z/r/proprio，展开块回喂 ẑ/r̂、**只带动作 token**（未来本体感不可知 ⇒ 可学习 null 向量填充）；固定最大展开 K=4 步、逐步监督（等效覆盖 unroll k∈{1,2,4}）。
+- **预测端监督对等（选项 A）**："T 预测输出应与 E 编码输出尽量不可分辨"——joint_pos 及未来注册的全局信号同样挂 r̂/ẑ 且**梯度进 T**（塑形预测；`stage1.signals_on_prediction.grad_into_t: false` 即选项 C 消融）；深度 D 同样解码 ẑ 但**对 T 保持 stop-grad**（只训 D + 监控；DINO-WM 消融惯例，§2.2——讨论结论：L_dyn 是"逐维相同"的充分条件，深度梯度给 T 提供的是"投影相同"的捷径，风险收益不成比例；信号头小、目标低维，直接进 T 是便宜保险）。
+- **时间口径统一 15fps**：real 名义 15fps（§0.2）；sim 30fps 抽帧到 15fps（先抽帧后运动抽稀，τ 语义同速率对齐）；帧内时间注入 = 帧索引 embedding（真机时间戳不可信）。
+
+**实现 [2026-09-15，已落地并冒烟通过]**：`scripts/build_latent_cache.py`（E 冻结前向落盘三通道 latent + rgb + 64×64 disparity 目标 + 动作/本体感，每 episode 一文件 + index.json，划分与 Stage 0 同 crc32 规则）→ `src/sawvla/data/latent_cache.py::LatentClipDataset`（滑窗 C+K=6 帧，LRU 加载）→ `scripts/train_stage1.py`（自由展开 K=4；L_dyn patch+register；信号真值侧训头/预测侧进 T；D 解码 z 与 ẑ 均 stop-grad 只训 D；**域探针挂预测输出**——E 冻结后 z 侧读数是常数，ẑ 的泄漏量才是监控对象；`--overfit-batch` 单 batch sanity 已通过）。T 扩展：`transition.py` 新增 `forward_with_registers / unroll_with_registers`（n_reg=4，register 头零初始化恒等起步，因果泄漏单测钉死）。pytest 101 全绿。
+
+**原始设计条目（仍为默认超参依据）**：
+
 - 冻结 E（或 0.1× lr），训练 T。动力学损失：
   ```
-  L_dyn = smooth_l1( ẑ_{t+1}, sg(z_{t+1}) ) + 多步展开版（unroll k∈{1,2,4}，目标一律 sg）
+  L_dyn = smooth_l1( ẑ_{t+1}, sg(z_{t+1}) ) + 多步展开版（目标一律 sg；register 通道同构一份 r̂ 损失）
   ```
-  frameskip 与动态区域加权生效（§2.3-T）。
-- 共享 D 同时解码 z_t 与 ẑ_{t+1}，**解码损失对 E、T 一律 stop-gradient**（只更新 D；理由见 §2.2）。
-- **隐空间离线缓存**：E 冻结后，先把全部帧的 z 一次性前向缓存落盘（`[已核实 2026-09-11，Franka]` 两域合计约 14.5 万帧 × 256×384×bf16 ≈ **28GB** 磁盘，全量缓存无压力，原"全量 vs 子集"待裁决项随之消失），T 训练直接读缓存 latent——编码开销从每步摊销变为一次性，Stage 1 提速约 3 倍。
-- lr 1e-4，8 帧片段 batch 8–16，梯度检查点。显存 ≈ 8–12GB。
-- **验收门**：1/4/8 步 latent 预测误差曲线平滑无发散；预测帧深度（D(ẑ)）在 val 上可视化合理；多步展开无塌缩（z 范数稳定）。
+  frameskip 与动态区域加权生效（§2.3-T；运动抽稀已承担 frameskip 的主要角色，clip_stride>1 为等价补充）。
+- 共享 D 同时解码 z_t 与 ẑ_{t+1}，**解码损失对 E、T 一律 stop-gradient**（只更新 D；理由见 §2.2；2026-09-15 选项 A 再次确认）。
+- **隐空间离线缓存**：E 冻结后，先把全部帧的 z 一次性前向缓存落盘（`[已核实 2026-09-11，Franka]` 两域合计约 14.5 万帧 × 256×384×bf16 ≈ **28GB** 磁盘，加 register/rgb/深度目标约 60GB 以内，全量缓存无压力），T 训练直接读缓存 latent——编码开销从每步摊销变为一次性，Stage 1 提速约 3 倍。
+- lr 1e-4，6 帧片段（2 上下文 + 4 展开）batch 8–16，梯度检查点。显存 ≈ 8–12GB。
+- **验收门**：1/4 步 latent 预测误差曲线平滑无发散（patch 与 register 分别报告）；预测帧深度（D(ẑ)）在 val 上可视化合理；多步展开无塌缩（z 范数稳定，`z_norm_ratio` ≈ 1）；预测侧探针读数登记进台账。
 
 ### Stage 2：联合微调 + 域对抗（消灭残余域信息）
 
 - 全部模块小 lr（3e-5 ~ 1e-4）联合微调；GRL 判别器上线，λ 从 0 在 ~5k step 内 ramp 到 0.05–0.1（**禁止一步加满**）。
 - 同时监控两条探针曲线（§7.3），这是判断拔河走向的唯一手段。
-- **验收门**：域探针准确率降至接近随机（50%±5），且深度探针指标不退化超过 5%（退化即回调 λ）。
+- **验收门**：reg_agnostic 通道域探针准确率降至接近随机（50%±5）——**GRL 只清理这个通道**（§2.4）；patch / reg_domain 通道的探针读数量化登记进台账（不设硬门，patch 允许残留）；且深度探针指标不退化超过 5%（退化即回调 λ）。
 
 ### Stage 3：冻结世界模型，接入 VLA（Qwen3-VL-2B）
 
@@ -271,10 +329,10 @@ L_smooth  = mean_{M=0}( |∇μ| · exp(−|∇rgb|) )                # RGB 边�
 
 ### 7.3 双探针诊断（必须实现，是核心观测手段）
 
-- **域探针**：冻结 z 上训线性/浅层 MLP 二分类（real/sim）。目标：Stage 2 后 ≈ 随机（50%）。
+- **域探针 [已实现 2026-09-14，三通道版]**：`DomainProbe`（§2.4）在 patch / reg_domain / reg_agnostic 三通道上各挂线性头，detach 不反传，常驻训练循环监控。读数口径：**reg_domain 应高**（域信息的设计住所）、**reg_agnostic 目标 ≈ 随机（50%）**（Stage 2 GRL 的唯一清理对象）、**patch 量化登记不设硬门**（隔离优于摧毁——残留已知、可查、可披露）。
 - **深度探针**：冻结 z 上训浅层深度头，监控 AbsRel/δ1.25。目标：各阶段不退化。
-- 探针同时挂在 `z_t` 与 `ẑ_{t+1}` 上；两条曲线画在同一面板，**分岔即拔河可视化**。
-- **决策程序（先量后治，禁止凭感觉加工程）**：最小配置（掩码+σ+多尺度梯度+GRL）先跑 → Stage 0 后域探针 ≈ 随机则维持现状；可判则加强教师监督权重或检查对齐实现，再测。
+- 深度探针同时挂在 `z_t` 与 `ẑ_{t+1}` 上；两条曲线画在同一面板，**分岔即拔河可视化**。
+- **决策程序（先量后治，禁止凭感觉加工程）**：最小配置（掩码+σ+多尺度梯度+分区探针）先跑 → reg_agnostic 探针 ≈ 随机则维持现状；可判则先检查信号泄漏路径（哪个信号头读错了通道），再考虑 Stage 2 GRL 上线或加强教师监督权重，再测。
 
 ### 7.4 评估掩码与训练掩码分离
 
@@ -337,7 +395,7 @@ L_smooth  = mean_{M=0}( |∇μ| · exp(−|∇rgb|) )                # RGB 边�
 |---|---|---|
 | 深度质量 | AbsRel、RMSE、δ<1.25 | 仅高置信有效像素（§7.4）；分域报告 |
 | 表征几何含量 | 线性深度探针 AbsRel（冻结 z） | 各阶段必测，作为阶段门 |
-| 域泄漏 | 域探针准确率 | 目标 ≈50%；z_t 与 ẑ_{t+1} 分别测 |
+| 域泄漏 | 域探针准确率（**patch / reg_domain / reg_agnostic 三通道分别报告**，§2.4） | reg_agnostic 目标 ≈50%；patch 残留量化披露不设硬门 |
 | 动力学 | 1/4/8 步 latent smooth-L1；D(ẑ) 深度指标随步数衰减曲线 | val 集 |
 | 下游 | VLA 成功率：sim、real、sim→real 零样本 | 最终裁决实验 |
 
@@ -353,14 +411,16 @@ L_smooth  = mean_{M=0}( |∇μ| · exp(−|∇rgb|) )                # RGB 边�
 project/
 ├── configs/            # yaml：data / model / loss / stage，一切实验由 config 驱动
 ├── src/
-│   ├── data/           # introspection 工具、预处理、WebDataset 写入/读取
-│   ├── models/         # encoder / transition / depth_decoder / discriminator / vla_adapter
-│   ├── losses/         # metric_nll / ssi_teacher / multiscale_grad / smooth / dyn / grl
-│   ├── train/          # stage0~3 入口，共用 Trainer
-│   └── eval/           # probes / depth_metrics / rollout 可视化
+│   ├── sawvla/
+│   │   ├── data/       # introspection 工具、预处理、按域 dataloader 子类、
+│   │   │               # latent_cache（Stage 1 缓存与 clip 数据集）
+│   │   ├── models/     # encoder / transition / depth_decoder / discriminator / domain_probe / vla_adapter
+│   │   ├── signals/    # 可插拔全局监督信号注册表（§2.4；trainer 零改动增删信号）
+│   │   └── losses/     # metric_nll / ssi_teacher / multiscale_grad / smooth / dyn / grl
+│   └── simulation/     # 自建仿真环境（IsaacLab；机器人/相机/RL 后端均可配，见其 README）
 ├── scripts/            # 一键脚本：prepare_data.sh / train_stage{0..3}.sh / eval_*.sh
 ├── docs/               # data_schema.md（§4.1 产出）、experiments.md（实验台账）
-└── tests/              # 掩码逻辑、loss 数值、GRL 符号方向的单测
+└── tests/              # 掩码逻辑、loss 数值、GRL 符号方向、分区纪律（梯度只进指定槽位）的单测
 ```
 
 ### 11.2 依赖基线
@@ -401,7 +461,7 @@ project/
 - **M1** 预处理缓存（教师深度、中值背景、掩码、64×64 监督目标、shard）就绪；
 - **M2** Stage 0 通过验收门（深度探针达标 + mask-only 基线对比取胜 + SSL 探针不退化）；
 - **M3** Stage 1 通过验收门（多步预测稳定）；
-- **M4** Stage 2 通过验收门（域探针 ≈ 随机且深度探针不退化）；
+- **M4** Stage 2 通过验收门（reg_agnostic 域探针 ≈ 随机且深度探针不退化，patch 泄漏量已登记）；
 - **M5** Stage 3 sim 域 BC 跑通，sim→real 零样本评估出数；
 - **M6** real 域微调与最终对比实验（§8.2 核心实验）完成。
 

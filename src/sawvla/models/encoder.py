@@ -3,7 +3,9 @@
 规格（guideline v2 §2.2/§2.3）：
 - 输入 224×224 RGB（ImageNet 归一化由 dataloader 负责）；
 - 输出 16×16=256 个 patch token，d=384，2D 网格结构保留，禁止全局池化；
-- CLS 与 4 个 register token 不进隐空间（隐空间必须是纯空间网格，便于 reshape）；
+- CLS 与 4 个 register token 不进深度隐空间（隐空间必须是纯空间网格），
+  但 register 是全局信号槽位：forward_tokens() 暴露三通道（2026-09-14
+  register 分区裁决，角色见 model.yaml encoder.register_roles）；
 - 初始化后全程可微调——GRL 除域与 Stage 0 深度塑形都需要梯度进入 E；
 - 防漂移锚（冻结副本 + 特征蒸馏正则）在训练脚本侧构建：再实例化一份并
   requires_grad_(False) 即可，本模块不内置。
@@ -52,8 +54,14 @@ class DINOv2Encoder(nn.Module):
         self.dim = int(self.backbone.config.hidden_size)
         self.num_patch_tokens = grid_size * grid_size
 
-    def forward(self, rgb: torch.Tensor) -> torch.Tensor:
-        """rgb: (B, 3, H, W) 已归一化 → z: (B, grid_size², d) 连续 latent。"""
+    def forward_tokens(self, rgb: torch.Tensor) -> dict[str, torch.Tensor]:
+        """rgb: (B, 3, H, W) → 三通道字典 cls (B,d) / registers (B,n_reg,d) /
+        patch (B,grid²,d)。
+
+        分区纪律（2026-09-14 裁决）：patch=局部通道（深度解码器专用）；
+        registers=全局槽位，角色划分见 model.yaml encoder.register_roles
+        （全局信号头只读 reg_agnostic）；CLS 目前无人消费、不锚定。
+        """
         out = self.backbone(pixel_values=rgb, interpolate_pos_encoding=True)
         tokens = out.last_hidden_state  # (B, 1 + n_reg + N, d)
         patch = tokens[:, 1 + self.num_registers:, :]
@@ -61,7 +69,13 @@ class DINOv2Encoder(nn.Module):
             raise ValueError(
                 f"patch token 数 {patch.shape[1]} != grid_size²={self.num_patch_tokens}，"
                 f"输入分辨率 {tuple(rgb.shape[-2:])} 与 image_size={self.image_size} 不一致")
-        return patch
+        return {"cls": tokens[:, 0, :],
+                "registers": tokens[:, 1:1 + self.num_registers, :],
+                "patch": patch}
+
+    def forward(self, rgb: torch.Tensor) -> torch.Tensor:
+        """rgb: (B, 3, H, W) 已归一化 → z: (B, grid_size², d) 连续 latent。"""
+        return self.forward_tokens(rgb)["patch"]
 
     def freeze(self) -> None:
         """Stage 1 冻结 E 用（或构建防漂移锚副本后调用）。"""

@@ -2,7 +2,11 @@
 
 规格（overall_tensor_flow.md §1.2/§3.2，设计文档 §7，guideline v2 §2.3）：
 - **序列组织**：逐帧 block 交错——block j = [z_j 的 256 个 patch token,
-  proprio_j token, a_j token]（a_j = 第 j 帧执行的动作，产生第 j+1 帧）；
+  （可选）r_j 的 n_reg 个 register token, proprio_j token, a_j token]
+  （a_j = 第 j 帧执行的动作，产生第 j+1 帧）；
+- **register 递推**（2026-09-15 裁决）：n_reg>0 时 T 同时预测 r̂，全局槽位
+  随时间演化；register 是全局 token，与条件 token 一样不做 2D-RoPE，只随
+  所属 block 加帧索引 embedding；
 - **block-causal**：block j 只能 attend block ≤ j ⇒ 第 j+1 帧预测只见
   a_{≤j}，禁止看未来动作；帧内 256 个 patch token 之间双向；
 - **teacher forcing**：训练时一次前向输入真值 z_{0..k-1}，并行读出 k 步
@@ -10,7 +14,10 @@
 - patch token 用 2D-RoPE（与 E 的 16×16 网格对齐）；动作/本体感 token 不做
   空间旋转，只随所属 block 加帧索引 embedding（时间维编码）；
 - 输出为**残差 delta**：ẑ_{j+1} = z_j + head(LN(x_j[:256]))，head 零初始化，
-  训练初期严格恒等起步，稳定早期训练。
+  训练初期严格恒等起步，稳定早期训练；register 头同样零初始化；
+- **展开块不带未来本体感**（2026-09-15 裁决）：rollout 时未来帧 proprio 不
+  可知，unroll 块的本体感槽位用可学习 null 向量填充
+  （forward_with_registers 的 proprio_valid 参数控制）。
 
 因果泄漏由 tests/test_transition.py::test_causal_leakage 钉死
 （overall §3.4：改未来动作，过去预测必须逐位不变）。
@@ -125,17 +132,21 @@ class TransitionModel(nn.Module):
         grid_size:    patch 网格边长（16）。
         n_cond:       每帧条件 token 数（1 本体感 + 1 动作 = 2）。
         max_frames:   帧索引 embedding 表大小（多步展开的最大步数）。
+        n_reg:        每帧 register token 数（2026-09-15 裁决：4，register
+                      通道由 T 递推）；0 = 纯 patch 模式（Stage 0 旧行为，
+                      forward/unroll 可用）。
     """
 
     def __init__(self, d: int = 384, depth: int = 8, n_heads: int = 6,
                  grid_size: int = 16, n_cond: int = 2,
-                 max_frames: int = 16) -> None:
+                 max_frames: int = 16, n_reg: int = 0) -> None:
         super().__init__()
         self.d = d
         self.grid_size = grid_size
         self.n_patch = grid_size * grid_size
         self.n_cond = n_cond
-        self.n_block = self.n_patch + n_cond
+        self.n_reg = int(n_reg)
+        self.n_block = self.n_patch + self.n_reg + n_cond
 
         rope_tables = _axis_rope_tables(grid_size, (d // n_heads) // 2)
         self.blocks = nn.ModuleList(
@@ -147,6 +158,14 @@ class TransitionModel(nn.Module):
         # 恒等起步：ẑ = z + head(...)，head 零初始化 ⇒ 初始 ẑ ≡ z
         nn.init.zeros_(self.head.weight)
         nn.init.zeros_(self.head.bias)
+        if self.n_reg > 0:
+            # register 递推头：同样残差 + 零初始化恒等起步
+            self.ln_f_reg = nn.LayerNorm(d)
+            self.head_reg = nn.Linear(d, d)
+            nn.init.zeros_(self.head_reg.weight)
+            nn.init.zeros_(self.head_reg.bias)
+            # 展开块的本体感槽位填充（未来 proprio 不可知，2026-09-15 裁决）
+            self.null_proprio = nn.Parameter(torch.zeros(d))
 
     def _causal_mask(self, k: int, device) -> torch.Tensor:
         """(k*n_block, k*n_block) bool；True = 允许 attend（block j 见 ≤j）。"""
@@ -156,7 +175,7 @@ class TransitionModel(nn.Module):
     def forward(self, z_seq: torch.Tensor, act_tokens: torch.Tensor,
                 proprio_tokens: torch.Tensor,
                 frame_offset: int = 0) -> torch.Tensor:
-        """teacher-forced 多步前向。
+        """teacher-forced 多步前向（纯 patch 模式，要求 n_reg=0）。
 
         z_seq:          (B, k, grid², d)，真值 latent z_{0..k-1}；
         act_tokens:     (B, k, d)，ActionAdapter 输出，a_j 作用于第 j 帧；
@@ -165,6 +184,10 @@ class TransitionModel(nn.Module):
 
         返回 ẑ: (B, k, grid², d)，第 j 项是第 j+1 帧的预测。
         """
+        if self.n_reg > 0:
+            raise RuntimeError(
+                "本模型构造时 n_reg>0（register 递推模式），请用 "
+                "forward_with_registers / unroll_with_registers")
         B, k, N, D = z_seq.shape
         if N != self.n_patch:
             raise ValueError(f"patch token 数 {N} != grid²={self.n_patch}")
@@ -187,6 +210,111 @@ class TransitionModel(nn.Module):
 
         x = x.reshape(B, k, self.n_block, D)[:, :, : self.n_patch]
         return z_seq + self.head(self.ln_f(x))
+
+    # ------------------------------------------------------------------ #
+    # register 递推模式（n_reg>0，2026-09-15 裁决：T 同时预测 ẑ 与 r̂）
+    # ------------------------------------------------------------------ #
+
+    def _embed_blocks(self, parts: list[torch.Tensor], k: int,
+                      frame_offset: int) -> torch.Tensor:
+        """拼接逐帧 block 并加帧索引 embedding → (B, k*n_block, d)。"""
+        x = torch.cat(parts, dim=2)                        # (B, k, n_block, d)
+        fr = torch.arange(frame_offset, frame_offset + k, device=x.device)
+        x = x + self.frame_embed(fr)[None, :, None, :]
+        return x.reshape(x.shape[0], k * self.n_block, x.shape[-1])
+
+    def _run_blocks(self, x: torch.Tensor, k: int) -> torch.Tensor:
+        attn_mask = self._causal_mask(k, x.device) if k > 1 else None
+        for blk in self.blocks:
+            x = blk(x, k, attn_mask)
+        return x
+
+    def forward_with_registers(
+            self, z_seq: torch.Tensor, r_seq: torch.Tensor,
+            act_tokens: torch.Tensor, proprio_tokens: torch.Tensor,
+            proprio_valid: torch.Tensor | None = None,
+            frame_offset: int = 0) -> dict[str, torch.Tensor]:
+        """teacher-forced / 自由展开通用前向（register 递推模式）。
+
+        z_seq / r_seq:  (B, k, grid², d) / (B, k, n_reg, d)——上下文帧为真值，
+                        展开步为回喂的 ẑ/r̂（由调用侧拼接，本函数不区分）；
+        act_tokens:     (B, k, d)；
+        proprio_tokens: (B, k, d)；
+        proprio_valid:  (B, k) bool，False 的步本体感槽位替换为可学习 null
+                        向量（展开块不带未来本体感，2026-09-15 裁决）；
+                        None = 全真（全上下文前向）。
+        frame_offset:   首个 block 的帧索引。
+
+        返回 {"patch": ẑ (B,k,grid²,d), "registers": r̂ (B,k,n_reg,d)}，
+        第 j 项是第 j+1 帧的预测（残差 delta，双头零初始化恒等起步）。
+        """
+        if self.n_reg <= 0:
+            raise RuntimeError("本模型构造时 n_reg=0，无 register 通道，"
+                               "请用 forward / unroll")
+        B, k, N, D = z_seq.shape
+        if N != self.n_patch:
+            raise ValueError(f"patch token 数 {N} != grid²={self.n_patch}")
+        if r_seq.shape[:2] != (B, k) or r_seq.shape[2] != self.n_reg:
+            raise ValueError(
+                f"r_seq 应为 (B,{k},{self.n_reg},d)，实际 {tuple(r_seq.shape)}")
+        if act_tokens.shape[:2] != (B, k) or proprio_tokens.shape[:2] != (B, k):
+            raise ValueError(
+                f"条件 token 步数与 z_seq 不一致: z (B,{k},...) vs "
+                f"act {tuple(act_tokens.shape)} / proprio {tuple(proprio_tokens.shape)}")
+
+        if proprio_valid is not None:
+            null = self.null_proprio.to(proprio_tokens.dtype)
+            proprio_tokens = torch.where(
+                proprio_valid[:, :, None].to(proprio_tokens.dtype) > 0.5,
+                proprio_tokens, null[None, None].expand(B, k, D))
+
+        # block j = [z_j (256), r_j (n_reg), proprio_j, a_j]
+        x = self._embed_blocks(
+            [z_seq, r_seq, proprio_tokens[:, :, None], act_tokens[:, :, None]],
+            k, frame_offset)
+        x = self._run_blocks(x, k)
+
+        x = x.reshape(B, k, self.n_block, D)
+        z_out = z_seq + self.head(self.ln_f(x[:, :, : self.n_patch]))
+        r_out = r_seq + self.head_reg(
+            self.ln_f_reg(x[:, :, self.n_patch: self.n_patch + self.n_reg]))
+        return {"patch": z_out, "registers": r_out}
+
+    @torch.no_grad()
+    def unroll_with_registers(
+            self, z0: torch.Tensor, r0: torch.Tensor,
+            act_tokens: torch.Tensor,
+            proprio_tokens: torch.Tensor | None = None,
+            proprio_valid: torch.Tensor | None = None) -> dict[str, torch.Tensor]:
+        """推理 rollout（register 模式）：逐步回喂 ẑ/r̂，不再依赖 RGB。
+
+        z0 / r0:        当前帧 latent，(B, grid², d) / (B, n_reg, d)；
+        act_tokens:     (B, k, d)，未来 k 步动作；
+        proprio_tokens: (B, k, d)，可选——未来本体感一般不可知，传 None
+                        则全部用 null 向量（与训练时展开块口径一致）；
+        proprio_valid:  (B, k) bool，与 forward_with_registers 同义。
+
+        返回 {"patch": (B,k,grid²,d), "registers": (B,k,n_reg,d)}。
+        """
+        k = act_tokens.shape[1]
+        B = act_tokens.shape[0]
+        if proprio_tokens is None:
+            proprio_tokens = act_tokens.new_zeros(B, k, self.d)
+            proprio_valid = torch.zeros(B, k, dtype=torch.bool,
+                                        device=act_tokens.device)
+        z, r = z0, r0
+        preds_z, preds_r = [], []
+        for j in range(k):
+            out = self.forward_with_registers(
+                z[:, None], r[:, None], act_tokens[:, j:j + 1],
+                proprio_tokens[:, j:j + 1],
+                None if proprio_valid is None else proprio_valid[:, j:j + 1],
+                frame_offset=j)
+            z, r = out["patch"][:, 0], out["registers"][:, 0]
+            preds_z.append(z)
+            preds_r.append(r)
+        return {"patch": torch.stack(preds_z, dim=1),
+                "registers": torch.stack(preds_r, dim=1)}
 
     @torch.no_grad()
     def unroll(self, z0: torch.Tensor, act_tokens: torch.Tensor,

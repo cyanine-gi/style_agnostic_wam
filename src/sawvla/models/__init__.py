@@ -13,6 +13,7 @@ from .action_adapter import ActionAdapter
 from .transition import TransitionModel
 from .depth_decoder import DepthDecoder
 from .discriminator import DomainDiscriminator
+from .domain_probe import DomainProbe
 from .vla_adapter import VLALatentAdapter
 
 __all__ = [
@@ -21,5 +22,6 @@ __all__ = [
     "TransitionModel",
     "DepthDecoder",
     "DomainDiscriminator",
+    "DomainProbe",
     "VLALatentAdapter",
 ]
