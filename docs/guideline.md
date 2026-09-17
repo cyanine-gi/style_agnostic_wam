@@ -294,6 +294,34 @@ L_smooth  = mean_{M=0}( |∇μ| · exp(−|∇rgb|) )                # RGB 边�
 - 同时监控两条探针曲线（§7.3），这是判断拔河走向的唯一手段。
 - **验收门**：reg_agnostic 通道域探针准确率降至接近随机（50%±5）——**GRL 只清理这个通道**（§2.4）；patch / reg_domain 通道的探针读数量化登记进台账（不设硬门，patch 允许残留）；且深度探针指标不退化超过 5%（退化即回调 λ）。
 
+**2026-09-16 裁决定稿（结构）**：
+
+- **E+T 联合在线微调**（用户裁决，否决了两段式）：E 继续训练 ⇒ latent 缓存对 T 过期，clip 直接从原始 HDF5 在线编码（`MotionThinnedClipDataset`，与 Stage 1 同 clip 语义：上下文 2 帧、展开 K=4、不跨 episode、sim 抽帧 15fps）；L_dyn 目标 sg(E(帧))，梯度经上下文同时进 E 与 T。
+- **锚缩到 patch + reg_domain**（用户裁决）：reg_agnostic 不再锚定——锚把 register 拉向带域信息的教师，与 GRL 在该槽位直接拔河；agnostic 槽位让位 GRL 自由清理。
+- **GRL 双挂点**：E 侧（clip 全部帧的 reg_agnostic）+ T 侧（每展开步的 r̂[:, agnostic]）；判别器为 register 扁平模式（`DomainDiscriminator(in_tokens=2)`，无空间 conv）；GRL batch 精确 50/50 域均衡（`DomainBalancedBatchSampler`，§9.1 硬要求）。
+
+**实现 [2026-09-16，已落地]**：`scripts/train_stage2.py`（E<-stage0 ckpt，T/adapter/D/signals<-stage1 ckpt，判别器/探针从零；深度真值帧梯度进 E+D、ẑ 侧 stop-grad 只训 D；信号真值侧进 E、预测侧进 T（选项 A 延续）；checkpoint/resume 与 Stage 0/1 同机制）。`scripts/train_stage2.sh`：20K 步、batch 8（50/50）、lr 5e-5，实测 ~4s/step ≈ 22h（在线解码+E 反传瓶颈，显存仅 ~2.1GB）。pytest 109 全绿（新增：判别器扁平模式、GRL 扁平模式符号、GRL/锚分区纪律、在线 clip 数据集、50/50 采样器、compute_losses 联合通路）。**盯表**：val/probe_e/reg_agnostic → ≈0.5（验收门）、train/disc/acc_*（拔河走向）、val/depth/true（退化 >5% 即回调 λ）。
+
+**2026-09-17 裁决（run1 失败复盘 + 修复）**：
+
+- **run1 事实**（用户手动跑完 20K 步，无崩溃）：`train/disc/acc_e` 钉 0.5 是**假象**——离线探针（冻结末态 E、train 流训探针、val 流评估）显示 reg_agnostic 仍 **1.000 线性可分**（验收门未过）；val 在线探针在 1.0↔0.0 间剧烈振荡（特征漂移把探针边界整体甩反）；anchor 0.176→~0.4 单调漂移不回落；joint_pos 信号退化 ~13×（压域信息的拉力误伤关节分布信息，且域信息没消灭，代价白付）；深度与 L_dyn 完好。
+- **机制诊断（minimax 失衡）**：λ=0.1 下 GRL 让 E 快速搅动特征骗当前判别器，判别器（单步更新、lr 1e-4）追不上移动目标——acc 0.5 是"追不上"而非"特征干净"，新探针立刻找到边界。E 侧 agnostic 槽位无锚无约束，漂移经共享 trunk 外溢。
+- **修复（用户裁决：组合方案）**：λ_max 0.1→**0.03**、ramp 5k→**10k**（减缓 E 漂移）；判别器 lr 1e-4→**3e-4** + **内循环 disc_inner_steps=4**（每步在 detach 特征上额外更新，让判别器贴近当前 E/T，新增 `disc/inner` 监控量）；均在 `configs/model.yaml` discriminator 节。另修正测速：实测 ~0.4s/step，20K 步 ≈ 2h（run1 实测值，此前 22h 估值受负载干扰）。
+- **教训（复盘登记）**：GRL 类对抗的 train acc=0.5 不能单独作为成功证据，**必须配合离线重训探针**（冻结特征、新探针）确认；验收门读数以离线探针为准。
+
+**2026-09-17 裁决·二（run2 失败复盘 + non-saturating 改造）**：
+
+- **run2 事实**（20K 步跑完无崩溃）：判别器过强——内循环+lr 3e-4 使其 **step 10 即 acc=1.0** 并保持（1727/2000 点 >0.99），`grl/e`≈2e-5（BCE 在 sigmoid 饱和区）⇒ **对抗梯度死亡**，E 不受清洗压力；val 探针 reg_agnostic 全程 1.000 不再振荡（E 不再被鞭打，恰证明对抗梯度消失）；离线探针终审仍 1.000。与 run1 构成两个极端：判别器追不上（run1）/ 碾压致梯度死亡（run2）。
+- **修复（用户裁决：non-saturating 对抗，GAN 式）**：E/T 侧对抗项改为**判别器参数冻结计算图上的标签翻转 BCE**（判别器越自信正确，E/T 收到的梯度越大，机制上消除饱和死亡）；判别器训练全部收进 `disc_inner_loop`（detach 特征，唯一通路，主损失不再给 disc 梯度——测试钉死）。λ_max=0.03 / ramp 10k / disc lr 3e-4 / inner=4 保持 run2 值（判别器强度在非饱和形式下反而有益）。新增监控 `disc/e`（判别器侧 BCE）；`grl/e`、`grl/t` 含义变为 E/T 侧非饱和对抗损失。
+- **独立发现（未处理，待裁决）**：anchor 两次运行都从 0.176 漂到 ~0.4，run2 几乎无对抗梯度也照样漂——漂移主因是联合微调固有梯度（depth/dyn/signal 进 E，lr 5e-5），锚权重 0.1 压不住，与 GRL 无关。
+
+**2026-09-17 裁决·三（run3 复盘 + 路线切换，已实现）**：
+
+- **run3 失败**：non-saturating 标签翻转 BCE 的最优点是"判别器自信判错"，无稳定不动点 ⇒ `disc/acc_e` 全程 0↔1 overshoot 振荡，离线探针终审仍 0.999。
+- **新路线（双开关，`stage2.adv`）**：**HSIC 惩罚默认开**（λ=1.0 / ramp 10k / 跨步 FIFO 缓冲 256——单 batch 48 样本 nHSIC 实测退化到 0，缓冲是硬性要求；λ=1.0 时 HSIC 梯度已是 joint_pos 再注入梯度的 ~25 倍），**熵混淆默认关**（推向批次经验先验 π̂ 而非写死 0.5；开启时才建判别器）。
+- **val 探针独立**：validate() 现场从零训线性探针（不再借用在线探针），逐域分层取样；验收基线 = 经验先验 `val/probe_prior`（数据集自然比率 ≈71:29，不假设 0.5）。
+- **历史测量缺陷登记**：run1-3 的 val 探针/指标实际只测了 real 单域（ConcatDataset 顺序取 batch 所致）；本轮起 val 逐域分层，**depth/latent_mse 绝对值口径变化，不与旧 run 直接比**。三连败完整复盘：`src/sawvla/train_failed_log.md`。joint_pos 再注入拔河：用户裁决先不管。
+
 ### Stage 3：冻结世界模型，接入 VLA（Qwen3-VL-2B）
 
 - 见 §8。E、T 全部冻结，只训 adapter + LoRA。

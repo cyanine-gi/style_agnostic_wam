@@ -67,6 +67,25 @@ stage1:
     enabled: true        # D 同时解码 ẑ（训练 D + 监控预测帧深度）
     grad_into_t: false   # 选项 A：深度对 T 保持 stop-grad（DINO-WM 消融惯例，§2.2）
 
+# Stage 2 联合微调 + 域对抗（scripts/train_stage2.py；2026-09-16 裁决）
+stage2:
+  batch: 4               # 在线 E 编码 L=6 帧/clip：B×6 图前向+反传，显存约束
+  lr: 5.0e-5             # 联合微调小 lr（guideline §6 Stage 2：3e-5~1e-4）
+  clip_stride: 1
+  domain_balanced: true  # GRL batch 精确 50/50（guideline §9.1 硬要求）
+  anchor:
+    distill_weight: 0.1
+    scope: [patch, reg_domain]  # [裁决 2026-09-16] reg_agnostic 不再锚定，让位 GRL 自由清理
+  grl:
+    on_encoder: true     # GRL 挂 E 的 reg_agnostic（Stage 2 主战场）
+    on_prediction: true  # GRL 同挂 T 的 r̂ reg_agnostic（T 递推 register ⇒ ẑ 侧同挂，§2.2）
+  # [2026-09-17 裁决·三] 清洗目标双开关（规格：src/sawvla/train_failed_log.md）。
+  # HSIC：非对弈惩罚，跨步 FIFO 缓冲作统计基底；熵混淆：推向批次经验先验
+  # π̂（不写死 0.5，数据集不均衡），开启时才建判别器。λ_hsic 冒烟试定。
+  adv:
+    hsic:    { enabled: true,  weight: 1.0,  ramp_steps: 10000, buffer_size: 256 }
+    entropy: { enabled: false, weight: 0.03, ramp_steps: 10000 }
+
 depth_decoder:
   out_size: 64         # 64×64（上限 112×112）；满分辨率仅评估/可视化
   width1: 256
@@ -78,8 +97,10 @@ depth_decoder:
 
 discriminator:
   hidden: 128          # ~1M 参数，刻意小容量防 GRL 不稳
-  grl_lambda_max: 0.1  # λ 从 0 在 ~5k step 内 ramp，禁止一步加满
-  grl_ramp_steps: 5000
+  # [2026-09-17 裁决·三] 判别器只在 stage2.adv.entropy.enabled=true 时建造；
+  # 以下 lr/内循环仅在那时生效（detach 特征，唯一训练通路）。
+  disc_lr: 3.0e-4
+  disc_inner_steps: 4
 
 loss:
   lambda_metric: 1.0   # 异方差 Laplacian NLL，仅传感器有效点

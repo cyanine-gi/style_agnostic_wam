@@ -1,6 +1,8 @@
 """损失函数模块（guideline v2 §5.2 / §6）。
 
 - grl:        梯度反转层（域对抗）
+- hsic:       归一化 HSIC 独立性惩罚 + 跨步 FIFO 缓冲（非对抗清洗，
+              2026-09-17 裁决·三）
 - depth:      L_metric（异方差 Laplacian NLL）、L_teacher（scale-and-shift
               对齐的教师蒸馏）、L_grad（多尺度梯度）、L_smooth（RGB 边缘感知
               平滑，仅空洞区），及组合 DepthLoss
@@ -10,11 +12,12 @@
 """
 
 from .grl import GradientReversal, grad_reverse
+from .hsic import HSICBuffer, normalized_hsic
 from .depth import DepthLoss, edge_smooth, metric_nll, multiscale_grad, ssi_teacher
 from .dyn import latent_prediction_loss
 
 __all__ = [
-    "GradientReversal", "grad_reverse",
+    "GradientReversal", "grad_reverse", "normalized_hsic", "HSICBuffer",
     "DepthLoss", "metric_nll", "ssi_teacher", "multiscale_grad", "edge_smooth",
     "latent_prediction_loss",
 ]
