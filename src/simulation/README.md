@@ -32,9 +32,15 @@ python src/simulation/scripts/play_hang_cup.py --steps 60 --episodes 1 --random-
 # -> outputs/sim_play/play_grid.png（全局相机 RGB + depth 网格）
 ```
 
+排障档案：[PENETRATION_DEBUG.md](PENETRATION_DEBUG.md) —— 2026-09-19
+杯-夹爪穿模彻查（根因=PhysX 顺从穿透；修复=求解迭代 8/4 + 杯 0.2kg +
+夹爪刚度 500，含复跑脚本）。
+
 - 任务 `Saw-HangCup-FrankaDual-v0` 已注册：双臂 Franka（robot 注册表
-  `robots.py`，可配置）+ 桌/杯/杯架钉 + 高置固定全局相机（近似 real 0520
-  斜视机位，细调用 `scripts/tune_camera.py --pos/--look-at/--focal`）；
+  `robots.py`，可配置）+ 桌/杯/杯架钉 + 多相机（2026-09-17 sawwam 裁决：
+  YAML `cameras` 每个键 = 场景成员 `camera_<键>`，当前 front/left/right
+  三路；front 近似 real 0520 斜视机位，细调用
+  `scripts/tune_camera.py --camera <键> --pos/--look-at/--focal`）；
 - 16 维绝对位置动作契约与 configs/data.yaml 一致（[L7,R7,gL,gR]），
   观测含 16 维 proprio + 杯/钉位姿 + RGB/depth（camera 独立 obs group，
   视觉从第一版在环）；
@@ -43,6 +49,23 @@ python src/simulation/scripts/play_hang_cup.py --steps 60 --episodes 1 --random-
   先 enter 再 import `simulation.tasks`）；
 - 合并环境（仿真+训练单进程）依赖清单：`src/simulation/requirements.txt`
   （新建 conda env 用，现有两个环境不动）。
+
+## 数据集录制（2026-09-17 sawwam 裁决，guideline §6.3 硬前提）
+
+管线：`scripts/train_rl.py`（阶段一纯状态 PPO，不渲染相机）→
+`scripts/record_hang_cup.py`（策略驱动采集）。
+
+- **相机随机化**：每集 reset 后按 YAML `randomize` 块独立采样各路
+  pos（±0.15m）/look_at（±0.05m）/focal（16–20mm），**集内固定**；
+  随机化只发生在录制脚本，RL 训练不渲染相机（策略是纯状态策略）。
+- **K/T 逐集落盘**：精确 K（原始像素，未做 letterbox 折叠）+ T_base_cam
+  （基座系 = 两臂基座中点、旋转单位阵，ROS 相机轴）写进 HDF5
+  （`camera_intrinsics/<cam>/matrix`、`camera_extrinsics/<cam>`）；
+  约定细则见 `recording.py` 模块文档——sawwam dataloader 以此为准。
+- **落盘 schema**：仿 RoboMIND 子集（vlen JPEG/PNG + master/puppet 8 条
+  曲线组 + metadata），现有 `sawvla.data.dataset.RoboMindDataset` 直接
+  可读；夹爪录制时线性翻转对齐 RoboMIND 语义（高=抓握）且保连续
+  （用户裁决，禁止二值化）；只落盘挂杯成功集（`--keep-failed` 另存）。
 
 ## 数据语义约定（与 RoboMIND 对齐）
 
@@ -56,6 +79,9 @@ python src/simulation/scripts/play_hang_cup.py --steps 60 --episodes 1 --random-
 - **深度可视化**：`viz.depth_to_rgb` 与数据侧
   `scripts/check_franka_dataset.depth_to_rgb` 同一逻辑（每帧 5–95 分位
   拉伸，红=远、蓝=近、无效=黑）——任何深度出图必须走它，禁止另起配色。
-- **动作/本体感**：16 维 [左臂7, 右臂7, 左爪, 右爪] 绝对位置（见
-  robots.py 与 mdp.py 契约注释）；夹爪行程 [0,0.04] m 大=张开，与
-  RoboMIND EE 语义（高=抓握）相反，重映射在数据对齐层。
+- **动作/本体感**：16 维 [左臂7, 右臂7, 左爪, 右爪]（见 robots.py 与
+  mdp.py 契约注释）。2026-09-18 裁决：**策略接口与数据契约解耦**——
+  策略侧动作项为增量式（`DualArmDeltaPositionAction`，clip [-1,1]×
+  scale，臂 ±0.1 rad/步、爪 ±0.01 m/步；绝对位+std≈1 噪声的探索结构
+  三轮不收敛），录制落盘记动作项 processed 的 16 维**绝对**目标；
+  夹爪录制时翻转对齐 RoboMIND 语义（高=抓握）且保连续。

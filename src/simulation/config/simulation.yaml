@@ -1,28 +1,37 @@
 # 仿真环境配置（src/simulation/ 的唯一配置入口；机器人/相机/任务参数都可换）
 # 2026-09-13 四项裁决落档：
 # 1. 双臂起步，机器人可配置（robot 字段换注册键即可，见 robots.py）；
-# 2. 视觉从第一版就在环，不追求 photo-realistic；相机默认高置固定
-#    （不随机身运动），未来支持腕部等机位（在 cameras 下加条目即可）；
+# 2. 视觉从第一版就在环，不追求 photo-realistic；
 # 3. RL 库 rsl_rl + 包装层（rl/facade.py），未来可换；
 # 4. 相机先近似 real 0520 批斜视机位，用 scripts/tune_camera.py 细调。
+# 2026-09-17 sawwam 裁决（guideline §6.3 硬前提）：
+# 5. 多相机（2–3 路同录），键名即场景成员 camera_<键> 与 HDF5 相机名；
+# 6. 每集位姿/焦距随机化（randomize 块，仅录制脚本消费，RL 训练不渲染相机），
+#    集内 K/T 固定；精确 K/T 逐集落盘 HDF5（src/simulation/recording.py）。
 
 task_id: Saw-HangCup-FrankaDual-v0
 robot: franka_dual
 
 env:
-  num_envs: 1
-  episode_length_s: 12.0
+  num_envs: 1            # 录制/冒烟用
+  rl_num_envs: 1024        # RL 训练并行数（train_rl.py 默认取这里）
+  episode_length_s: 26.7   # 2026-09-21 路线 A：max_steps=400 步 × 1/15Hz
+                           #（约为成功 episode 平均步数 2 倍，文档 §10）
   # 控制频率 15Hz（2026-09-15 裁决：对齐 RoboMIND Franka real 名义 15fps/66.6ms；
   # Franka-sim 数据是 30fps，训练帧流统一抽帧到 15fps，本环境直接以 15Hz 产出）
-  decimation: 4            # 控制频率 = 60Hz sim / 4 = 15Hz（Δt = 66.7ms）
-  sim_dt: 0.0166667        # 60 Hz
+  decimation: 8            # 控制频率 = 120Hz sim / 8 = 15Hz（Δt = 66.7ms 不变）
+  sim_dt: 0.0083333        # 120 Hz（2026-09-19：60Hz 下快挥臂 22mm/步穿过
+                          # 10mm 杯壁——隧道效应；120Hz 减半到 11mm，配合
+                          # 双方 8mm contact offset 边际 16mm 堵住）
 
-# 高置固定全局相机（世界系，pos + look_at 直白调参）
-# 机位 = real 0520 批 camera_front：在机器人**对向**（-y 侧）高置俯望桌面，
+# 多相机（世界系，pos + look_at 直白调参）。
+# front = real 0520 批 camera_front：在机器人**对向**（-y 侧）高置俯望桌面，
 # 双臂从画面上方左右角进入，杯架在近侧右下。位姿调参工具：
-#   python scripts/tune_camera.py --pos x,y,z --look-at x,y,z
+#   python src/simulation/scripts/tune_camera.py --camera front --pos x,y,z --look-at x,y,z
+# randomize 块（2026-09-17 裁决，量级可调）：pos ±0.15m、look_at ±0.05m、
+# focal 16–20mm，逐集独立采样，集内固定。不需要随机化的相机删掉该块即可。
 cameras:
-  global:
+  front:
     pos: [0.0, -1.05, 1.55]
     look_at: [0.0, 0.0, 0.75]        # 桌面中心
     width: 1280
@@ -31,3 +40,29 @@ cameras:
     # 深度语义统一为 RoboMIND 约定（2026-09-14 裁决）：z-depth（轴向，
     # distance_to_image_plane），单位毫米（在读取处 m→mm 换算）
     data_types: [rgb, distance_to_image_plane]
+    randomize:
+      pos_delta_m: [0.15, 0.15, 0.15]
+      look_at_delta_m: [0.05, 0.05, 0.05]
+      focal_range_mm: [16.0, 20.0]
+  left:                              # 左侧（-x）斜俯机位
+    pos: [-1.05, -0.35, 1.40]
+    look_at: [0.0, 0.0, 0.75]
+    width: 1280
+    height: 720
+    focal_length_mm: 18.0
+    data_types: [rgb, distance_to_image_plane]
+    randomize:
+      pos_delta_m: [0.15, 0.15, 0.15]
+      look_at_delta_m: [0.05, 0.05, 0.05]
+      focal_range_mm: [16.0, 20.0]
+  right:                             # 右侧（+x）斜俯机位
+    pos: [1.05, -0.35, 1.40]
+    look_at: [0.0, 0.0, 0.75]
+    width: 1280
+    height: 720
+    focal_length_mm: 18.0
+    data_types: [rgb, distance_to_image_plane]
+    randomize:
+      pos_delta_m: [0.15, 0.15, 0.15]
+      look_at_delta_m: [0.05, 0.05, 0.05]
+      focal_range_mm: [16.0, 20.0]

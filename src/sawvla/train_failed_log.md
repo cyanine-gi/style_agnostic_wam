@@ -137,3 +137,22 @@ stage2:
   先看 HSIC 能压到什么水平。
 - anchor 漂移（共同观察 2）：独立问题，另行裁决。
 
+## run4（2026-09-17）与路线终结：HSIC 压到边界但锁不住 → 放弃本数据集对抗清洗
+
+- 配置：HSIC（λ=1.0，ramp 10k，跨步缓冲 256）；熵混淆关。用户另试 λ=3，
+  同样不可靠。
+- 结果（修正版 val 探针逐 ckpt 扫描，覆盖 18/22 个 val episode，
+  `scripts/eval_stage2_ckpts.py` → `outputs/stage2/eval_ckpts.json`）：
+  探针 1k-12k 钉 1.0，13k 起松动，**17k 精确贴 prior（0.538 vs 0.537）**，
+  18-19k 反弹 0.93，20k 收在 0.792——**扫到边界但没锁定**。深度无损、
+  无振荡（HSIC 无对弈动力学 ✓），但 14k 后 mse4 0.021→0.027 轻微代价。
+- 扫描中发现并修复的历史测量缺陷：val_loader 顺序取批 ⇒ run1-3 的 val
+  探针只测 real 单域；run4 初版逐域分层但 shuffle=False ⇒ 每次 val 每域
+  只见 **1 个 episode**（probe 平坦 1.0 的假象）；已改 seeded shuffle。
+- **用户终裁（2026-09-17）：放弃在 RoboMIND 数据集上做对抗/惩罚式清洗。**
+  根因判断：相机位姿未条件化，固定机位差异本身就是完美的域标识符，
+  特征清洗在这个数据集上不可靠。路线切换到 **sawwam**（相机条件化 +
+  slot 场景表示，自家 Isaac Lab 仿真环境做视角随机化，K/T 逐集落盘），
+  权威文档 src/sawwam/guideline.md。本台账四次失败（run1 追不上 / run2
+  饱和死 / run3 overshoot / run4 锁不住）作为对抗清洗路线的完整记录封存。
+

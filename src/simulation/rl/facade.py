@@ -23,14 +23,22 @@ def make_runner(env, agent_cfg, log_dir: str, device: str = "cuda:0"):
                           device=device)
 
 
-def load_policy(runner_log_dir: str, env, device: str = "cuda:0"):
-    """加载已训练策略（play/评估用）。"""
+def load_policy(runner_log_dir: str, env, agent_cfg, device: str = "cuda:0"):
+    """加载已训练策略（play/录制/可视化用）。runner_log_dir 可为含
+    model.pt 的目录，也可直接给一个 .pt ckpt 文件路径。
+
+    agent_cfg 必须与训练时同一个 runner cfg 类实例（如
+    HangCupPPORunnerCfg()）——rsl_rl 3.x 的 OnPolicyRunner 构造时就要
+    algorithm/policy/obs_groups 全量配置来建网络，再 load 权重；
+    网络结构对不上 ckpt 会 load 失败。
+    """
     from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
     from rsl_rl.runners import OnPolicyRunner
     import os
     wrapped = env if isinstance(env, RslRlVecEnvWrapper) else RslRlVecEnvWrapper(env)
-    resume_path = os.path.join(runner_log_dir, "model.pt")
-    runner = OnPolicyRunner(wrapped, {"device": device}, log_dir=None,
+    resume_path = (runner_log_dir if str(runner_log_dir).endswith(".pt")
+                   else os.path.join(runner_log_dir, "model.pt"))
+    runner = OnPolicyRunner(wrapped, agent_cfg.to_dict(), log_dir=None,
                             device=device)
     runner.load(resume_path)
     return runner.get_inference_policy(device=device)

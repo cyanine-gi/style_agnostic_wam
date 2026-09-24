@@ -5,10 +5,10 @@
 
 用法：
     python src/simulation/scripts/tune_camera.py \
-        --pos 0,-0.95,1.45 --look-at 0,0.05,0.75 [--out /tmp/cam.png]
+        [--camera front] --pos 0,-0.95,1.45 --look-at 0,0.05,0.75 [--out /tmp/cam.png]
 反复调整参数直到渲染视角与 real 参考帧
 （outputs/check_franka/ 或 check_camera_views/ 里的 real 图）对齐，
-然后把最终参数写回 src/simulation/config/simulation.yaml 的 cameras.global。
+然后把最终参数写回 src/simulation/config/simulation.yaml 对应相机条目。
 """
 
 import argparse
@@ -29,6 +29,8 @@ def parse_xyz(s: str) -> list[float]:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--camera", default="front",
+                    help="YAML cameras 下的键名（front/left/right/...）")
     ap.add_argument("--pos", type=parse_xyz, default=None)
     ap.add_argument("--look-at", type=parse_xyz, default=None)
     ap.add_argument("--focal", type=float, default=None, help="焦距 mm")
@@ -42,12 +44,13 @@ def main():
     with SimContext(headless=True) as ctx:
         from simulation.tasks.hang_cup.env_cfg import load_sim_config
         cfg = load_sim_config()
+        cam_key = args.camera
         if args.pos is not None:
-            cfg["cameras"]["global"]["pos"] = args.pos
+            cfg["cameras"][cam_key]["pos"] = args.pos
         if args.look_at is not None:
-            cfg["cameras"]["global"]["look_at"] = args.look_at
+            cfg["cameras"][cam_key]["look_at"] = args.look_at
         if args.focal is not None:
-            cfg["cameras"]["global"]["focal_length_mm"] = args.focal
+            cfg["cameras"][cam_key]["focal_length_mm"] = args.focal
 
         # 用覆盖后的配置现场构建 env cfg
         import simulation.tasks.hang_cup.env_cfg as ec
@@ -57,7 +60,7 @@ def main():
         home = torch.zeros(1, 16, device=env.unwrapped.device)
         for _ in range(10):                       # 等渲染管线稳定
             env.step(home)
-        cam = env.unwrapped.scene.sensors["camera_global"]
+        cam = env.unwrapped.scene.sensors[f"camera_{cam_key}"]
         rgb = cam.data.output["rgb"][0, ..., :3].cpu().numpy()
         from simulation.viz import read_depth_mm
         dep = read_depth_mm(cam)                              # (H,W) mm
@@ -69,9 +72,9 @@ def main():
     d = (depth_to_rgb(dep) * 255).astype("uint8")
     cv2.imwrite(str(args.out.with_name(args.out.stem + "_depth.png")),
                 cv2.cvtColor(d, cv2.COLOR_RGB2BGR))
-    print(f"pos={cfg['cameras']['global']['pos']} "
-          f"look_at={cfg['cameras']['global']['look_at']} "
-          f"focal={cfg['cameras']['global']['focal_length_mm']}")
+    print(f"camera={cam_key} pos={cfg['cameras'][cam_key]['pos']} "
+          f"look_at={cfg['cameras'][cam_key]['look_at']} "
+          f"focal={cfg['cameras'][cam_key]['focal_length_mm']}")
     print(f"-> {args.out}（及 _depth.png）")
 
 

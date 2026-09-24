@@ -44,6 +44,7 @@ def _build_franka_dual() -> dict:
     """
     from isaaclab_assets import FRANKA_PANDA_HIGH_PD_CFG
     from isaaclab.assets import ArticulationCfg
+    import isaaclab.sim as sim_utils
 
     # 平伸 home：j2 前倾 45°、j4 肘部展开、j6 腕部放平（手爪朝前水平）
     HOME_JOINT_POS = {
@@ -56,6 +57,27 @@ def _build_franka_dual() -> dict:
         import math
         yaw = math.radians(yaw_deg)
         cfg: ArticulationCfg = FRANKA_PANDA_HIGH_PD_CFG.copy()
+        # 2026-09-18：夹爪-杯接触力奖励需要指根的 contact reporter
+        cfg.spawn.activate_contact_sensors = True
+        # 2026-09-20 用户裁决：开单臂自碰撞（自碰撞惩罚的物理前提——
+        # 不开则自身 link 间不产生接触，传感器恒 0）。关节直连的相邻
+        # link PhysX 自动豁免；指-指/指-掌接触不在惩罚传感器范围内
+        # （env_cfg 的 contact_self_* 只覆盖 link1-7+hand）。
+        cfg.spawn.articulation_props = cfg.spawn.articulation_props.replace(
+            enabled_self_collisions=True)
+        # 2026-09-19 隧道效应加固：panda USD 的碰撞凸 hull 没有写
+        # contact offset（吃 PhysX 默认小值），而 delta 动作下指尖速度
+        # 可达 ~1.35m/s（120Hz 物理步 ~11mm/步）。显式给 8mm speculative
+        # 边际（与杯侧 8mm 相加 = 16mm > 11mm），堵快挥臂穿杯壁。
+        cfg.spawn.collision_props = sim_utils.CollisionPropertiesCfg(
+            contact_offset=0.008, rest_offset=0.001)
+        # 2026-09-19 穿模彻查裁决（debug_penetration.py 同场景 A/B）：
+        # iter8+杯0.2kg 后，棱接触硬夹仍有 0.8~2.2mm 持续穿透——驱动源是
+        # 夹爪位置驱动刚度 2e3 恒定输出 ~25N 满压力（0.2kg 杯保持只需
+        # ~2N）。2e3→500（+damping 1e2→25）后同场景 A_close 2.25mm→0.00mm；
+        # 峰值夹持力 ~12N 仍 ≫ 保持所需。注意：改动力学，RL 需重训。
+        cfg.actuators["panda_hand"].stiffness = 500.0
+        cfg.actuators["panda_hand"].damping = 25.0
         cfg.init_state.pos = pos
         cfg.init_state.rot = (math.cos(yaw / 2), 0.0, 0.0, math.sin(yaw / 2))
         cfg.init_state.joint_pos = dict(HOME_JOINT_POS)

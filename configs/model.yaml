@@ -83,7 +83,7 @@ stage2:
   # HSIC：非对弈惩罚，跨步 FIFO 缓冲作统计基底；熵混淆：推向批次经验先验
   # π̂（不写死 0.5，数据集不均衡），开启时才建判别器。λ_hsic 冒烟试定。
   adv:
-    hsic:    { enabled: true,  weight: 1.0,  ramp_steps: 10000, buffer_size: 256 }
+    hsic:    { enabled: true,  weight: 3.0,  ramp_steps: 10000, buffer_size: 256 }
     entropy: { enabled: false, weight: 0.03, ramp_steps: 10000 }
 
 depth_decoder:

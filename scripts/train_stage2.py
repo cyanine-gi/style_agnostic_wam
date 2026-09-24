@@ -350,9 +350,10 @@ def fresh_probe_acc(feat, labels, iters=500, lr=1e-2, seed=0):
 
 @torch.no_grad()
 def validate(models, fns, val_loaders, C, K, device, s2,
-             max_batches: int = 10):
+             max_batches: int = 10, probe_seed: int = 0):
     """验证：损失/逐步误差 + 独立探针。val_loaders = 逐域 loader 列表
-    （分层各取 max_batches//2 批，两域都覆盖）。"""
+    （分层各取 max_batches//2 批，两域都覆盖）；也可直接传"逐域 batch
+    列表的列表"（ckpt 扫扫时让所有 ckpt 评同一批样本）。"""
     E, T, adapter, D, heads = (models[k] for k in
                                ("E", "T", "adapter", "D", "heads"))
     disc = models.get("disc")
@@ -409,7 +410,7 @@ def validate(models, fns, val_loaders, C, K, device, s2,
         out[f"latent_mse_reg/step_{j + 1}"] = step_err_r[j] / max(n, 1)
     y = torch.cat(labs)
     for ch, feats in pool.items():
-        acc, prior = fresh_probe_acc(torch.cat(feats), y)
+        acc, prior = fresh_probe_acc(torch.cat(feats), y, seed=probe_seed)
         out[f"probe_e/{ch}"] = acc
         out["probe_prior"] = prior
     return out
@@ -517,8 +518,13 @@ def main():
     train_loader = DataLoader(train_cat, batch_sampler=sampler,
                               num_workers=args.workers, pin_memory=True)
     # 逐域 val loader：分层取样，两域都覆盖（ConcatDataset 顺序取 batch
-    # 会只拿到 real——run1-3 的 val 探针/指标其实只测了单域，已记入台账）
-    val_loaders = [DataLoader(v, batch_size=batch, shuffle=False,
+    # 会只拿到 real——run1-3 的 val 探针/指标其实只测了单域，已记入台账）；
+    # shuffle=True（共享 generator 逐 epoch 推进）：每次 validate 的前几批
+    # 不再固定落在同一批 episode 上（run4 缺陷：顺序取批 ⇒ 每域只见 1 个
+    # episode，探针测的是"这一集 vs 那一集"而非域信息）。
+    val_gen = torch.Generator().manual_seed(args.seed)
+    val_loaders = [DataLoader(v, batch_size=batch, shuffle=True,
+                              generator=val_gen,
                               num_workers=args.workers, pin_memory=True)
                    for v in val_per_dom]
     print(f"clips: train={len(train_cat)} (real {n_real} / sim "

@@ -49,32 +49,25 @@ def main():
 
         def snapshot(step, tag):
             from simulation.viz import read_depth_mm
-            cam = env.unwrapped.scene.sensors["camera_global"]
+            cam = env.unwrapped.scene.sensors["camera_front"]
             rgb = cam.data.output["rgb"][0, ..., :3].cpu().numpy()
             dep = read_depth_mm(cam)                          # (H,W) mm
             frames.append((step, tag, rgb, dep))
 
-        # 阶段 1：home 姿态（动作 = 当前关节角，即保持不动）
-        home = torch.cat([
-            env.unwrapped.scene["robot_left"].data.joint_pos[0,
-                env.unwrapped.scene["robot_left"].find_joints(
-                    [f"panda_joint{i}" for i in range(1, 8)], preserve_order=True)[0]],
-            env.unwrapped.scene["robot_right"].data.joint_pos[0,
-                env.unwrapped.scene["robot_right"].find_joints(
-                    [f"panda_joint{i}" for i in range(1, 8)], preserve_order=True)[0]],
-            torch.tensor([0.04, 0.04], device=env.unwrapped.device),
-        ])[None]
+        # 阶段 1：保持姿态（delta 动作契约：全零 = 保持当前关节位，
+        # 2026-09-18 起动作项为增量式，reset 后当前位即 home）
+        home = torch.zeros(1, 16, device=env.unwrapped.device)
         for t in range(args.steps):
             obs, rew, term, trunc, _ = env.step(home)
             if t % 30 == 0:
                 snapshot(t, "home")
 
-        # 阶段 2：随机动作 episode（验证动作链路 + 物理响应）
+        # 阶段 2：随机动作 episode（raw delta，验证动作链路 + 物理响应）
         rng = torch.Generator(device=env.unwrapped.device).manual_seed(0)
         for ep in range(args.episodes):
             obs, _ = env.reset()
             for t in range(args.random_steps):
-                a = home + 0.1 * torch.randn(
+                a = 0.3 * torch.randn(
                     home.shape, generator=rng, device=env.unwrapped.device)
                 obs, rew, term, trunc, _ = env.step(a)
                 if t % 25 == 0:
